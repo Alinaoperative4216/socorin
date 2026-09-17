@@ -3,7 +3,9 @@
 # and the updater artifacts with their signatures into public/downloads/
 # (git-ignored there; the Docker image takes them from the working tree),
 # and commits the checksums, version.json (the manifest the app reads once
-# a day and the updater plugin installs from) and the download links.
+# a day and the updater plugin installs from), the download links and the
+# installer sizes on the page (and their translations in lib/i18n.ts). The
+# commit takes only those files: other work in that checkout stays out.
 #
 #   scripts/publish-landing.sh                 # version from tauri.conf.json
 #   scripts/publish-landing.sh 1.0.2 "notes"   # explicit version, release notes
@@ -94,9 +96,35 @@ sed -E -i '' \
   "$PAGE"
 grep -c "Socorin_${VERSION}_" "$PAGE" >/dev/null || { echo "no download links updated in $PAGE" >&2; exit 1; }
 
+# The installer sizes on the page ("Bộ cài .exe · 3,7 MB", "Universal .dmg ·
+# 7,6 MB", the sentence naming both) and their English translations in
+# lib/i18n.ts: decimal megabytes with one decimal, a comma in Vietnamese, a
+# dot in English. The previous sizes are read from the page itself.
+I18N="$LANDING/lib/i18n.ts"
+mb() { node -p "(require('fs').statSync('$1').size / 1e6).toFixed(1)"; }
+NEW_WIN=$(mb "$SRC/Socorin_${VERSION}_x64-setup.exe")
+NEW_MAC=$(mb "$SRC/Socorin_${VERSION}_universal.dmg")
+OLD_WIN=$(sed -nE 's/.*Bộ cài \.exe · ([0-9]+,[0-9]) MB.*/\1/p' "$PAGE" | head -1 | tr ',' '.')
+OLD_MAC=$(sed -nE 's/.*Universal \.dmg · ([0-9]+,[0-9]) MB.*/\1/p' "$PAGE" | head -1 | tr ',' '.')
+if [ -z "$OLD_WIN" ] || [ -z "$OLD_MAC" ]; then
+  echo "warning: the installer sizes were not found in $PAGE; update them by hand" >&2
+elif { [ "$OLD_WIN" = "$OLD_MAC" ] && [ "$NEW_WIN" != "$NEW_MAC" ]; } || [ "$NEW_WIN" = "$OLD_MAC" ] || [ "$NEW_MAC" = "$OLD_WIN" ]; then
+  echo "warning: the old and new sizes overlap (Windows $OLD_WIN -> $NEW_WIN, macOS $OLD_MAC -> $NEW_MAC); update them by hand" >&2
+else
+  for f in "$PAGE" "$I18N"; do
+    sed -E -i '' \
+      -e "s/${OLD_WIN/./,} MB/${NEW_WIN/./,} MB/g" -e "s/${OLD_WIN/./\\.} MB/${NEW_WIN} MB/g" \
+      -e "s/${OLD_MAC/./,} MB/${NEW_MAC/./,} MB/g" -e "s/${OLD_MAC/./\\.} MB/${NEW_MAC} MB/g" \
+      "$f"
+  done
+  echo "sizes: Windows ${NEW_WIN} MB, macOS ${NEW_MAC} MB (were ${OLD_WIN} / ${OLD_MAC})"
+fi
+
 cd "$LANDING"
-# The installers themselves stay out of git (see .gitignore there).
-git add public/downloads/SHA256SUMS.txt public/version.json components/landing-page.tsx
-git commit -m "Socorin ${VERSION}: installers, updater manifest, checksums and links" \
-  -m "Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
-echo "Committed in $LANDING; redeploy the landing page so socorin.com/version.json serves ${VERSION}."
+# The installers themselves stay out of git (see .gitignore there). Only
+# the files below go into the commit: other work in that checkout, staged
+# or not, stays out of it.
+PUBLISHED=(public/downloads/SHA256SUMS.txt public/version.json components/landing-page.tsx lib/i18n.ts)
+git add -- "${PUBLISHED[@]}"
+git commit -m "Socorin ${VERSION}: installers, updater manifest, checksums, links and sizes" -- "${PUBLISHED[@]}"
+echo "Committed in $LANDING; push it and redeploy the landing page so socorin.com/version.json serves ${VERSION}."
