@@ -1,0 +1,889 @@
+:root {
+  --bg: #f5f5f7;
+  --card: #ffffff;
+  --text: #1d1d1f;
+  --muted: #6e6e73;
+  --border: #d2d2d7;
+  --accent: #0a84ff;
+  --accent-text: #ffffff;
+  --danger: #ff3b30;
+  --ok: #34c759;
+  --warn-bg: #fff6e0;
+  --warn-border: #f0c86b;
+  --toolbar: #2b2b2e;
+  --toolbar-text: #f2f2f4;
+  --toolbar-muted: #9b9ba2;
+  --toolbar-hover: #3a3a3e;
+  --toolbar-active: #0a84ff;
+  --toolbar-active-hover: #3d9cff;
+  --canvas-bg: #1c1c1e;
+  color-scheme: light dark;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #1c1c1e;
+    --card: #2c2c2e;
+    --text: #f2f2f4;
+    --muted: #98989e;
+    --border: #3a3a3c;
+    --warn-bg: #3a3020;
+    --warn-border: #7a6430;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  margin: 0;
+  height: 100%;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  font-size: 13px;
+  color: var(--text);
+  background: var(--bg);
+  -webkit-font-smoothing: antialiased;
+}
+
+html[data-window="overlay"],
+html[data-window="overlay"] body {
+  background: #000;
+  overflow: hidden;
+  cursor: crosshair;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+html[data-window="editor"],
+html[data-window="editor"] body {
+  background: var(--canvas-bg);
+  overflow: hidden;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+button {
+  font: inherit;
+  color: var(--accent-text);
+  background: var(--accent);
+  border: none;
+  border-radius: 4px;
+  padding: 6px 14px;
+  cursor: pointer;
+}
+
+button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+button.secondary {
+  background: var(--card);
+  color: var(--text);
+  border: 1px solid var(--border);
+}
+
+button.ghost {
+  background: transparent;
+  color: var(--accent);
+  padding: 6px 8px;
+}
+
+button.ghost.danger {
+  color: var(--danger);
+}
+
+input[type="text"],
+input:not([type]) {
+  font: inherit;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 6px 9px;
+  width: 100%;
+  outline: none;
+}
+
+input:focus {
+  border-color: var(--accent);
+}
+
+code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  background: var(--bg);
+  padding: 1px 4px;
+  border-radius: 4px;
+}
+
+kbd {
+  font: inherit;
+  padding: 1px 6px;
+  border: 1px solid rgba(255, 255, 255, 0.4);
+  border-radius: 4px;
+}
+
+/* ---------- Record bar (on the overlay, and in its own window while recording) ---------- */
+
+/* Fixed width and fixed button slots: the bar in the recording window is
+   drawn exactly over the one the overlay showed, so Record turns into Stop
+   and Cancel stays where it was. */
+.record-bar {
+  width: 400px;
+  box-sizing: border-box;
+}
+
+.record-bar .toolbar-row {
+  flex-wrap: nowrap;
+}
+
+/* Fixed, whole-pixel widths: the buttons land on the very same pixels in
+   both states (a content-sized width is fractional and rounds differently). */
+.record-bar .tool-btn {
+  flex: none;
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.record-hint {
+  color: var(--toolbar-muted);
+  padding: 0 8px 0 4px;
+  white-space: nowrap;
+}
+
+.record-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 8px 0 4px;
+  white-space: nowrap;
+}
+
+.rec-ok {
+  color: #34c759;
+}
+
+.tool-btn.record,
+.tool-btn.stop {
+  width: 92px;
+  background: var(--danger);
+  color: #fff;
+}
+
+.tool-btn.cancel {
+  width: 90px;
+}
+
+.tool-btn.stop-copy {
+  width: 124px;
+}
+
+.tool-btn.record:hover:not(:disabled),
+.tool-btn.stop:hover:not(:disabled) {
+  background: #ff5b52;
+}
+
+.tool-btn.stop-copy {
+  background: var(--toolbar-active);
+  color: #fff;
+}
+
+.tool-btn.stop-copy:hover:not(:disabled) {
+  background: var(--toolbar-active-hover);
+}
+
+.rec-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--danger);
+  flex: none;
+}
+
+.rec-dot.live {
+  animation: rec-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes rec-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.3;
+  }
+}
+
+.rec-time {
+  font-size: 14px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---------- Welcome ---------- */
+
+html[data-window="welcome"],
+html[data-window="welcome"] body {
+  overflow: hidden;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.welcome {
+  height: 100%;
+  padding: 28px 36px 24px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  gap: 10px;
+}
+
+.welcome-logo {
+  margin-bottom: 4px;
+  border-radius: 22px;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.18);
+}
+
+.welcome h1 {
+  font-size: 20px;
+  margin: 4px 0 2px;
+}
+
+.welcome p {
+  margin: 0;
+  line-height: 1.5;
+  color: var(--text);
+}
+
+.welcome kbd {
+  border-color: var(--border);
+  background: var(--card);
+  font-weight: 600;
+}
+
+.welcome-note {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.welcome-ok {
+  margin-top: auto;
+  min-width: 120px;
+  padding: 8px 20px;
+  font-weight: 600;
+}
+
+/* ---------- Update popover (own window) ---------- */
+
+/* A transparent window under the menu bar / tray icon; only the card (and
+   its shadow, inside the 16 px margin that windows.rs UPDATE_MARGIN keeps
+   around it) is visible. */
+html[data-window="update"],
+html[data-window="update"] body {
+  background: transparent;
+  overflow: hidden;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.update-notice {
+  margin: 16px;
+  height: calc(100% - 32px);
+  padding: 14px 16px;
+  display: flex;
+  gap: 14px;
+  align-items: flex-start;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.22);
+}
+
+.update-logo {
+  flex: none;
+  border-radius: 10px;
+  margin-top: 2px;
+}
+
+.update-body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.update-body h1 {
+  font-size: 14px;
+  margin: 0;
+}
+
+.update-body p {
+  margin: 0;
+  line-height: 1.4;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.update-body .row {
+  margin-top: 4px;
+}
+
+.progress {
+  height: 6px;
+  border-radius: 3px;
+  background: var(--border);
+  overflow: hidden;
+}
+
+.progress > div {
+  height: 100%;
+  border-radius: 3px;
+  background: var(--accent);
+  transition: width 0.2s;
+}
+
+.progress > div.indeterminate {
+  animation: progress-slide 1.2s ease-in-out infinite;
+}
+
+@keyframes progress-slide {
+  0% {
+    margin-left: 0;
+  }
+  50% {
+    margin-left: 70%;
+  }
+  100% {
+    margin-left: 0;
+  }
+}
+
+/* Settings → Updates */
+.update-row {
+  flex-wrap: wrap;
+}
+
+.update-line {
+  flex: 1;
+  min-width: 160px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+/* ---------- Recording bar (own window) ---------- */
+
+/* A transparent window: only the bar (and its shadow) is visible. */
+html[data-window="recorder"],
+html[data-window="recorder"] body {
+  background: transparent;
+  color: var(--toolbar-text);
+  overflow: hidden;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.recorder-window {
+  position: fixed;
+  inset: 0;
+}
+
+/* ---------- Overlay ---------- */
+
+.overlay {
+  position: fixed;
+  inset: 0;
+}
+
+.overlay-canvas {
+  position: absolute;
+  inset: 0;
+  display: block;
+}
+
+.overlay-hint {
+  position: absolute;
+  top: 24px;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 8px 14px;
+  border-radius: 8px;
+  background: rgba(20, 20, 20, 0.8);
+  color: #fff;
+  font-size: 13px;
+  pointer-events: none;
+  white-space: nowrap;
+}
+
+.overlay-error {
+  top: 64px;
+  background: rgba(200, 40, 30, 0.9);
+}
+
+/* ---------- In-place editor (on the overlay) ---------- */
+
+.inplace {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  cursor: default;
+}
+
+.inplace-stage {
+  position: absolute;
+}
+
+.inplace-stage .canvas-holder {
+  margin: 0;
+  box-shadow: none;
+}
+
+.floating-toolbar {
+  position: absolute;
+  pointer-events: auto;
+  cursor: default;
+  /* Size must not depend on where the toolbar is put: an absolutely
+     positioned box shrinks to the room left of its `left`, which near the
+     right edge made it wrap, get re-measured, move, wrap differently… */
+  width: max-content;
+  max-width: calc(100vw - 16px);
+}
+
+.toolbar.floating {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 4px;
+  padding: 5px 8px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 8px;
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.45);
+}
+
+.toolbar-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+
+.toolbar-row .spacer {
+  flex: 1;
+  min-width: 8px;
+}
+
+.inplace-toast {
+  position: absolute;
+  left: 0;
+  top: calc(100% + 6px);
+  max-width: 100%;
+  padding: 6px 10px;
+  border-radius: 6px;
+  background: rgba(200, 40, 30, 0.92);
+  color: #fff;
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ---------- Settings ---------- */
+
+.settings {
+  max-width: 560px;
+  margin: 0 auto;
+  padding: 20px 20px 28px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.settings.loading {
+  color: var(--muted);
+  text-align: center;
+  padding-top: 80px;
+}
+
+.settings-header h1 {
+  font-size: 20px;
+  margin: 0 0 4px;
+}
+
+.settings-header p {
+  margin: 0;
+  color: var(--muted);
+}
+
+.card {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.card.warning {
+  background: var(--warn-bg);
+  border-color: var(--warn-border);
+}
+
+.card h2 {
+  font-size: 13px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+  margin: 0;
+}
+
+.card p {
+  margin: 0;
+  line-height: 1.45;
+}
+
+.hint {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.field {
+  display: grid;
+  grid-template-columns: 140px 1fr;
+  align-items: center;
+  gap: 10px;
+}
+
+.field > span {
+  color: var(--text);
+}
+
+.row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.row.grow > input {
+  flex: 1;
+  min-width: 0;
+}
+
+.hotkey-field {
+  display: flex;
+  gap: 4px;
+  align-items: center;
+}
+
+.hotkey-field input {
+  cursor: pointer;
+  text-align: center;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+}
+
+.hotkey-field input.recording {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 25%, transparent);
+}
+
+.hotkey-field input.recording::placeholder {
+  color: var(--accent);
+  font-weight: 500;
+  letter-spacing: normal;
+}
+
+.hotkey-field input.invalid {
+  border-color: var(--danger);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--danger) 25%, transparent);
+}
+
+.hotkey-field input.invalid::placeholder {
+  color: var(--danger);
+}
+
+.radio-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.radio,
+.checkbox {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+}
+
+.settings-footer {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  align-items: flex-end;
+}
+
+.footer-links {
+  justify-content: space-between;
+  width: 100%;
+}
+
+.copyright {
+  width: 100%;
+  margin: 6px 0 0;
+  text-align: center;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.copyright a {
+  color: var(--accent);
+  text-decoration: none;
+}
+
+.copyright a:hover {
+  text-decoration: underline;
+}
+
+.status {
+  min-height: 18px;
+  font-size: 12px;
+  align-self: stretch;
+  text-align: right;
+}
+
+.status.ok {
+  color: var(--ok);
+}
+
+.status.error {
+  color: var(--danger);
+}
+
+/* ---------- Editor ---------- */
+
+.editor {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  color: var(--toolbar-text);
+}
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 10px;
+  background: var(--toolbar);
+  border-bottom: 1px solid #000;
+  flex-wrap: wrap;
+  flex: none;
+}
+
+.toolbar .sep {
+  width: 1px;
+  height: 22px;
+  background: #4a4a4f;
+  margin: 0 6px;
+}
+
+.toolbar .spacer {
+  flex: 1;
+}
+
+.tool-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  width: 32px;
+  height: 30px;
+  padding: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--toolbar-text);
+}
+
+.tool-btn.wide {
+  width: auto;
+  padding: 0 10px;
+}
+
+.tool-btn:hover:not(:disabled) {
+  background: var(--toolbar-hover);
+}
+
+.tool-btn.active {
+  background: var(--toolbar-active);
+  color: #fff;
+}
+
+.tool-btn.primary {
+  background: var(--accent);
+}
+
+/* Blue buttons brighten on hover instead of falling back to the grey hover. */
+.tool-btn.active:hover:not(:disabled),
+.tool-btn.primary:hover:not(:disabled) {
+  background: var(--toolbar-active-hover);
+}
+
+.tool-btn:disabled {
+  opacity: 0.35;
+}
+
+.swatches {
+  display: flex;
+  gap: 4px;
+  align-items: center;
+}
+
+.swatch {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  border: 2px solid transparent;
+  padding: 0;
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.35);
+}
+
+.swatch.active {
+  border-color: #fff;
+}
+
+.swatch.custom {
+  overflow: hidden;
+  position: relative;
+  background: conic-gradient(red, yellow, lime, cyan, blue, magenta, red);
+}
+
+.swatch.custom input {
+  position: absolute;
+  inset: -8px;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.sizes {
+  display: flex;
+  gap: 2px;
+}
+
+.size-btn {
+  width: 26px;
+  height: 26px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 4px;
+  background: transparent;
+  padding: 0;
+}
+
+.size-btn.active {
+  background: var(--toolbar-hover);
+}
+
+.size-btn i {
+  display: block;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.zoom-label {
+  min-width: 44px;
+  text-align: center;
+  color: var(--toolbar-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.canvas-viewport {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  display: grid;
+  place-items: center;
+  background: var(--canvas-bg);
+  background-image:
+    linear-gradient(45deg, #232326 25%, transparent 25%),
+    linear-gradient(-45deg, #232326 25%, transparent 25%),
+    linear-gradient(45deg, transparent 75%, #232326 75%),
+    linear-gradient(-45deg, transparent 75%, #232326 75%);
+  background-size: 20px 20px;
+  background-position: 0 0, 0 10px, 10px -10px, -10px 0;
+}
+
+.canvas-holder {
+  position: relative;
+  margin: 16px;
+  box-shadow: 0 6px 30px rgba(0, 0, 0, 0.5);
+}
+
+.canvas-holder.tool-select {
+  cursor: default;
+}
+
+.canvas-holder.tool-draw {
+  cursor: crosshair;
+}
+
+.canvas-holder.tool-text {
+  cursor: text;
+}
+
+.text-editor {
+  position: absolute;
+  margin: 0;
+  padding: 0;
+  border: 1px dashed rgba(255, 255, 255, 0.6);
+  outline: none;
+  background: rgba(0, 0, 0, 0.15);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  font-weight: 700;
+  line-height: 1;
+  resize: none;
+  overflow: hidden;
+  white-space: pre;
+  min-width: 40px;
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+.statusbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 4px 12px;
+  background: var(--toolbar);
+  border-top: 1px solid #000;
+  color: var(--toolbar-muted);
+  font-size: 12px;
+  flex: none;
+  min-height: 26px;
+}
+
+.statusbar .toast {
+  margin-left: auto;
+  color: var(--toolbar-text);
+}
+
+.statusbar .toast.error {
+  color: #ff6b60;
+}
+
+.empty-state {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  color: var(--toolbar-muted);
+}

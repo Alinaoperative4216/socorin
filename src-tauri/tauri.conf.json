@@ -1,0 +1,89 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Socorin",
+  "version": "1.0.2",
+  "identifier": "com.socorin",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "macOSPrivateApi": true,
+    "windows": [
+      {
+        "label": "main",
+        "title": "Socorin Settings",
+        "width": 540,
+        "height": 720,
+        "minWidth": 480,
+        "minHeight": 560,
+        "resizable": true,
+        "visible": false,
+        "center": true
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' blob: data:; connect-src ipc: http://ipc.localhost; object-src 'none'; base-uri 'none'"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "createUpdaterArtifacts": true,
+    "targets": "all",
+    "category": "Utility",
+    "shortDescription": "Lightweight cross-platform screenshot and annotation tool",
+    "publisher": "Socorin",
+    "copyright": "Copyright © 2026 Socorin",
+    "license": "Apache-2.0",
+    "homepage": "https://socorin.com",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "macOS": {
+      "minimumSystemVersion": "11.0",
+      "signingIdentity": "-"
+    },
+    "linux": {
+      "deb": {
+        "depends": [
+          "libwebkit2gtk-4.1-0",
+          "libgtk-3-0",
+          "libayatana-appindicator3-1",
+          "libpipewire-0.3-0",
+          "libdbus-1-3",
+          "libxcb1",
+          "libxcb-randr0",
+          "libwayland-client0",
+          "libwayland-server0",
+          "libgbm1",
+          "libegl1"
+        ]
+      }
+    },
+    "windows": {
+      "signCommand": {
+        "cmd": "../scripts/windows-sign.sh",
+        "args": ["%1"]
+      },
+      "nsis": {
+        "compression": "zlib",
+        "installerIcon": "icons/icon.ico"
+      }
+    }
+  },
+  "plugins": {
+    "updater": {
+      "endpoints": ["https://socorin.com/version.json"],
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEVFMDdBNTM2RTYxNDU1MjcKUldRblZSVG1OcVVIN29MelNtTjBjRlFqK29aOEpBM21XLzVqZHFQdHZLenlleENqdzlpK25KYWUK",
+      "windows": {
+        "installMode": "passive"
+      }
+    }
+  }
+}

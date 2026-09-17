@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+# Drop-in `makensis` that runs inside Docker. Only what the NSIS step needs is
+# mounted, at the same paths, so every absolute path Tauri passes stays
+# valid: the project (or the cargo target dir when it lives elsewhere) and
+# Tauri's cache with the NSIS plugins. Nothing else from the home directory
+# is visible to the container.
+set -euo pipefail
+IMAGE="screenshot-nsis:3.12"
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+CACHE="$HOME/Library/Caches/tauri"
+if ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
+  docker build -t "$IMAGE" -f "$ROOT/docker/Dockerfile.nsis" "$ROOT/docker" >&2
+fi
+mkdir -p "$CACHE"
+# `--export-share DIR`: copy the image's NSIS data (official Plugins, Stubs,
+# Include) to DIR for the Tauri bundler, which needs NSIS_PATH/Plugins on the
+# host (see scripts/build-windows.sh).
+if [ "${1:-}" = "--export-share" ]; then
+  mkdir -p "$2"
+  exec docker run --rm -v "$2:/out" --entrypoint cp "$IMAGE" -r /usr/local/share/nsis/. /out/
+fi
+MOUNTS=(-v "$ROOT:$ROOT" -v "$CACHE:$CACHE:ro")
+case "$PWD/" in "$ROOT"/*) ;; *) MOUNTS+=(-v "$PWD:$PWD") ;; esac
+if [ -n "${CARGO_TARGET_DIR:-}" ]; then
+  MOUNTS+=(-v "$CARGO_TARGET_DIR:$CARGO_TARGET_DIR")
+fi
+# makensis signs the uninstaller itself (!uninstfinalize -> scripts/windows-sign.sh),
+# so the certificate and its settings have to reach the container as well.
+ENV=()
+if [ -n "${WINDOWS_SIGN_PFX:-}" ]; then
+  WINDOWS_SIGN_PFX="$(cd "$(dirname "$WINDOWS_SIGN_PFX")" && pwd)/$(basename "$WINDOWS_SIGN_PFX")"
+  MOUNTS+=(-v "$WINDOWS_SIGN_PFX:$WINDOWS_SIGN_PFX:ro")
+  for v in WINDOWS_SIGN_PFX WINDOWS_SIGN_PASSWORD WINDOWS_SIGN_TIMESTAMP_URL; do
+    [ -n "${!v:-}" ] && ENV+=(-e "$v=${!v}")
+  done
+fi
+exec docker run --rm "${MOUNTS[@]}" ${ENV[@]+"${ENV[@]}"} -w "$PWD" "$IMAGE" "$@"

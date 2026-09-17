@@ -1,0 +1,43 @@
+# makensis for Tauri's Windows installer step. Homebrew's makensis crashes on
+# Apple Silicon, so scripts/makensis-docker runs this image instead.
+#
+# Built from the official NSIS release, not the distribution package: Ubuntu's
+# nsis is compiled with MinGW and its installer stubs carry a .reloc section
+# that makensis leaves pointing at a stale address once it grows .ndata. PE
+# parsers (and antivirus engines) then report the installer as "corrupt".
+# The official stubs (MSVC-built, no .reloc) do not have that defect.
+# Same recipe as Homebrew's makensis formula: compile only makensis here and
+# take Stubs, Plugins, Include and Contrib from the official zip.
+# osslsigncode: makensis finalises the uninstaller in here (!uninstfinalize),
+# so scripts/windows-sign.sh must be able to sign inside the container too.
+FROM ubuntu:22.04
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates curl unzip bzip2 scons g++ zlib1g-dev osslsigncode \
+  && rm -rf /var/lib/apt/lists/*
+
+ARG NSIS_VERSION=3.12
+# SHA-256 of the two SourceForge downloads (as pinned by Homebrew's formula).
+ARG NSIS_SRC_SHA256=f3ed7a8e4aa2cf4e8cf47d3b563a02559e0cb4934db2662b2f9661b824e2b186
+ARG NSIS_ZIP_SHA256=56581f90db321581c5381193d796fffcf2d24b2f8fed2160a6c6a3baa67f2c4f
+RUN set -eu; cd /tmp; \
+    base="https://downloads.sourceforge.net/project/nsis/NSIS%203/${NSIS_VERSION}"; \
+    curl -fsSLo nsis-src.tar.bz2 "${base}/nsis-${NSIS_VERSION}-src.tar.bz2"; \
+    curl -fsSLo nsis.zip "${base}/nsis-${NSIS_VERSION}.zip"; \
+    echo "${NSIS_SRC_SHA256}  nsis-src.tar.bz2" | sha256sum -c -; \
+    echo "${NSIS_ZIP_SHA256}  nsis.zip" | sha256sum -c -; \
+    tar xjf nsis-src.tar.bz2; \
+    cd "nsis-${NSIS_VERSION}-src"; \
+    scons makensis \
+      PREFIX=/usr/local PREFIX_DOC=/usr/local/share/nsis/Docs \
+      SKIPMISC=all SKIPPLUGINS=all SKIPSTUBS=all SKIPUTILS=all STRIP=0 \
+      VERSION="${NSIS_VERSION}"; \
+    install -m 755 build/urelease/makensis/makensis /usr/local/bin/makensis; \
+    cd /tmp; unzip -q nsis.zip; \
+    mkdir -p /usr/local/share/nsis; \
+    cp -r "nsis-${NSIS_VERSION}/Stubs" "nsis-${NSIS_VERSION}/Plugins" \
+          "nsis-${NSIS_VERSION}/Include" "nsis-${NSIS_VERSION}/Contrib" \
+          /usr/local/share/nsis/; \
+    rm -rf /tmp/nsis*; \
+    makensis -VERSION; echo
+ENTRYPOINT ["makensis"]

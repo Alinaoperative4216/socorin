@@ -1,0 +1,49 @@
+# Build environment for the Linux (.deb / .AppImage) bundles.
+# Usage: scripts/build-linux.sh [amd64|arm64]
+FROM ubuntu:24.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates curl wget file git rsync xz-utils build-essential pkg-config \
+    libssl-dev libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev \
+    librsvg2-dev libxdo-dev libpipewire-0.3-dev libdbus-1-dev libxcb1-dev \
+    libxcb-randr0-dev libxcb-shape0-dev libxcb-xfixes0-dev patchelf \
+    desktop-file-utils libgtk-3-bin squashfs-tools \
+    clang libclang-dev libgbm-dev libegl1-mesa-dev libgl-dev libdrm-dev libwayland-dev xdg-utils \
+  && rm -rf /var/lib/apt/lists/*
+
+# Node: a pinned release from nodejs.org, checked against the SHA-256 from
+# its SHASUMS256.txt (no `curl | bash` installer).
+ARG NODE_VERSION=22.23.2
+RUN set -eu; \
+    case "$(uname -m)" in \
+      x86_64)  arch=x64;   sha=d60acfe00a2932254bb0ad20e01b0d74397a0875595de719654b214f4b03f307 ;; \
+      aarch64) arch=arm64; sha=fff4078c5def658577f92c88db7db3bc0072924bfb93fe52c1e744a54e94abb8 ;; \
+      *) echo "unsupported architecture: $(uname -m)" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSLo /tmp/node.tar.xz "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-${arch}.tar.xz"; \
+    echo "${sha}  /tmp/node.tar.xz" | sha256sum -c -; \
+    tar -xJf /tmp/node.tar.xz -C /usr/local --strip-components=1 --no-same-owner; \
+    rm /tmp/node.tar.xz; \
+    node --version; npm --version
+
+# Rust: a pinned rustup-init, checked against the SHA-256 Rust publishes
+# next to it, instead of piping sh.rustup.rs into a shell.
+ENV RUSTUP_HOME=/usr/local/rustup CARGO_HOME=/usr/local/cargo PATH=/usr/local/cargo/bin:$PATH
+ARG RUSTUP_VERSION=1.29.1
+RUN set -eu; \
+    case "$(uname -m)" in \
+      x86_64)  triple=x86_64-unknown-linux-gnu;  sha=dda7234360b7f578ca8b0ddcb80145646fa61a67c1720a5abc7051b35c9fcb71 ;; \
+      aarch64) triple=aarch64-unknown-linux-gnu; sha=15f6e4ce9f583b929c996c91562bad6d4454f3281de858b02cdfdef615fac433 ;; \
+      *) echo "unsupported architecture: $(uname -m)" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSLo /tmp/rustup-init "https://static.rust-lang.org/rustup/archive/${RUSTUP_VERSION}/${triple}/rustup-init"; \
+    echo "${sha}  /tmp/rustup-init" | sha256sum -c -; \
+    chmod +x /tmp/rustup-init; \
+    /tmp/rustup-init -y --no-modify-path --profile minimal --default-toolchain stable; \
+    rm /tmp/rustup-init; \
+    cargo --version
+
+# AppImage tooling cannot use FUSE inside a container.
+ENV APPIMAGE_EXTRACT_AND_RUN=1 NO_STRIP=true CI=true
+WORKDIR /build

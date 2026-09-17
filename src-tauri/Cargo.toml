@@ -1,0 +1,85 @@
+[package]
+name = "socorin"
+version = "1.0.2"
+description = "Lightweight cross-platform screenshot and annotation tool"
+authors = ["Socorin"]
+homepage = "https://socorin.com"
+repository = "https://github.com/huystr/socorin"
+license = "Apache-2.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+# The `_lib` suffix may seem redundant but it is necessary
+# to make the lib name unique and wouldn't conflict with the bin name.
+# This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
+name = "socorin_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[features]
+# Lets the SOCORIN_DEBUG_* environment variables dump bitmaps and drive
+# captures in a release build (end-to-end tests). Never ship with it on.
+debug-harness = []
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+# `macos-private-api`: transparent windows (the floating recording bar).
+tauri = { version = "2", features = ["image-png", "tray-icon", "macos-private-api"] }
+tauri-plugin-opener = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+xcap = "0.9.8"
+tauri-plugin-global-shortcut = "2.3.2"
+tauri-plugin-autostart = "2.5.1"
+tauri-plugin-single-instance = "2.4.4"
+tauri-plugin-clipboard-manager = "2.3.3"
+tauri-plugin-dialog = "2.7.3"
+# Same crate the dialog plugin uses; needed directly for a parent-less modal
+# save panel on macOS (see capture::save_png_as).
+rfd = { version = "0.16", default-features = false }
+chrono = "0.4.45"
+percent-encoding = "2.3.2"
+# Update check (daily read of socorin.com/version.json) and install. reqwest
+# and rustls are the plugin's own; `rustls-no-provider` mirrors its feature
+# set, so the app installs the ring provider before the first request.
+tauri-plugin-updater = "2"
+semver = "1"
+url = "2"
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls-no-provider", "system-proxy"] }
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
+
+
+# Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = 3
+panic = "abort"
+strip = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6.4"
+
+[target.'cfg(unix)'.dependencies]
+# SIGINT to the recording encoder so it finalises the file.
+libc = "0.2"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+# CF_HDROP clipboard (copying a recording as a file).
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_System_DataExchange",
+    "Win32_System_Memory",
+    "Win32_System_Ole",
+] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# Same gtk Tauri links; the file clipboard (text/uri-list) goes through it.
+gtk = "0.18"
+
+[dev-dependencies]
+# `tauri::test` (mock runtime) for the unit tests; never part of the app.
+tauri = { version = "2", features = ["image-png", "tray-icon", "macos-private-api", "test"] }

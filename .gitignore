@@ -1,0 +1,46 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+node_modules
+dist
+coverage
+*.tsbuildinfo
+dist-ssr
+*.local
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# Built installers (copied from src-tauri/target/*/bundle)
+installers/
+design/preview/
+
+# Apple signing / notarization secrets (see .env.apple.example)
+.env.apple
+*.p8
+*.p12
+
+# Windows signing secrets (see .env.windows.example)
+.env.windows
+*.pfx
+
+# Updater signing secrets (see .env.updater.example)
+.env.updater
+
+# Claude Code working notes: local only, never published
+CLAUDE.md
+.claude/
