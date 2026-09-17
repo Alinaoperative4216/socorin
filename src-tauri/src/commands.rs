@@ -111,7 +111,9 @@ pub fn overlay_pixels<R: Runtime>(app: AppHandle<R>, monitor_id: u32) -> Result<
     Ok(Response::new(shot.image.as_raw().clone()))
 }
 
-#[tauri::command]
+/// `async` for the same reason as `edit_png`: in editor mode it opens the
+/// editor window.
+#[tauri::command(async)]
 pub fn finish_region<R: Runtime>(app: AppHandle<R>, region: Region) -> Result<(), String> {
     capture::finish_region(&app, region)
 }
@@ -123,7 +125,10 @@ pub fn begin_annotation<R: Runtime>(app: AppHandle<R>, monitor_id: u32) {
 }
 
 /// Body: PNG bytes. Ends the session and opens the image in the editor window.
-#[tauri::command]
+/// `async` runs it off the main thread: on Windows, building a webview window
+/// inside a synchronous command deadlocks WebView2 (a blank, frozen window;
+/// see `WebviewWindowBuilder::new`).
+#[tauri::command(async)]
 pub fn edit_png<R: Runtime>(app: AppHandle<R>, request: Request<'_>) -> Result<(), String> {
     let png = raw_body(&request)?;
     capture::edit_png(&app, png)
