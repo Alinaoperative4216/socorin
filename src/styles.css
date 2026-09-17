@@ -397,6 +397,11 @@ html[data-window="share"] body {
   -webkit-user-select: text;
 }
 
+/* The card hugs its content instead of filling the (roomy) window. */
+.share-notice {
+  height: auto;
+}
+
 .share-warning strong {
   font-weight: 600;
   color: var(--text);

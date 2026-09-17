@@ -17,14 +17,6 @@ export function keptFor(expiresAt: string, retentionDays: number, now = Date.now
   return `${days} day${days === 1 ? "" : "s"}`;
 }
 
-/** "expires in 60 days" / "expires in 1 day" / "expires today" from an ISO date. */
-export function expiresIn(expiresAt: string, retentionDays: number, now = Date.now()): string {
-  const at = Date.parse(expiresAt);
-  const days = Number.isNaN(at) ? retentionDays : Math.ceil((at - now) / 86_400_000);
-  if (days <= 0) return "expires today";
-  return `expires in ${days} day${days === 1 ? "" : "s"}`;
-}
-
 /**
  * The small popover next to the button that was clicked (under the menu
  * bar / tray icon when there was none) after "Upload & copy link": the link
@@ -142,7 +134,7 @@ export function ShareNotice() {
     const { link, retentionDays } = notice;
     body = (
       <>
-        <h1>Link copied · {expiresIn(link.expiresAt, retentionDays)}</h1>
+        <h1>Link copied</h1>
         <code className="share-link" title={link.shareUrl}>
           {link.shareUrl}
         </code>

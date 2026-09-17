@@ -2,7 +2,7 @@ import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { ShareNotice as Notice, SharedLink } from "../lib/ipc";
 import { installTauri, type TauriMock } from "../test/tauri";
-import { expiresIn, keptFor, LIFETIME_MS, ShareNotice } from "./ShareNotice";
+import { keptFor, LIFETIME_MS, ShareNotice } from "./ShareNotice";
 
 let tauri: TauriMock;
 const DAY = 86_400_000;
@@ -21,18 +21,6 @@ beforeEach(() => {
   tauri = installTauri("share", { share_notice: () => shared });
 });
 
-describe("expiresIn", () => {
-  it("counts the days from the ISO date, falling back to the retention", () => {
-    const now = Date.parse("2026-09-18T10:00:00Z");
-    expect(expiresIn("2026-11-17T10:00:00Z", 60, now)).toBe("expires in 60 days");
-    expect(expiresIn("2026-11-17T09:00:00Z", 60, now)).toBe("expires in 60 days");
-    expect(expiresIn("2026-09-19T09:00:00Z", 60, now)).toBe("expires in 1 day");
-    expect(expiresIn("2026-09-18T09:00:00Z", 60, now)).toBe("expires today");
-    expect(expiresIn("soon", 60, now)).toBe("expires in 60 days");
-    expect(expiresIn("soon", 0, now)).toBe("expires today");
-  });
-});
-
 describe("keptFor", () => {
   it("names the server's retention, or the days left when it did not say", () => {
     const now = Date.parse("2026-09-18T10:00:00Z");
@@ -48,7 +36,7 @@ describe("Share popover", () => {
   it("shows the copied link, reveals the window once, copies again and deletes", async () => {
     render(<ShareNotice />);
     expect(tauri.calls("share_ready")).toHaveLength(0);
-    await screen.findByText("Link copied · expires in 60 days");
+    await screen.findByText("Link copied");
     expect(screen.getByText(link.shareUrl)).toBeTruthy();
     expect(screen.getByText(/Anyone with the link can open the file/)).toBeTruthy();
     expect(screen.getByText("It is deleted from the server after 60 days at the latest.").tagName).toBe("STRONG");
