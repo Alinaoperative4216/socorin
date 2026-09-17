@@ -2,10 +2,12 @@
 //!
 //! macOS uses the system `screencapture -v` (H.264 .mov, cursor included,
 //! no extra dependency; it inherits the app's Screen Recording permission).
-//! Windows and Linux (X11) use `ffmpeg` (see `ffmpeg_binary` for where it
-//! is looked for). One recording at a time: starting again stops the
-//! running one, stopping finalises the file, reveals it in the file manager
-//! and reports `capture-done`.
+//! Windows records in-process with Windows.Graphics.Capture and Media
+//! Foundation (`wgc`), with `ffmpeg` as the fallback (and as the recorder
+//! when Settings → Recording names one). Linux (X11) uses `ffmpeg` (see
+//! `ffmpeg_binary` for where it is looked for). One recording at a time:
+//! starting again stops the running one, stopping finalises the file,
+//! reveals it in the file manager and reports `capture-done`.
 //!
 //! The region is chosen on the capture overlay (`capture::Mode::Record`),
 //! which is hidden before the encoder starts so it is never in the video.
@@ -32,6 +34,8 @@ use crate::{
     capture::{self, MonitorGeom},
     clipboard, debug, settings, tray, windows,
 };
+#[cfg(windows)]
+use crate::wgc;
 
 /// What to record: a rectangle inside one monitor, in that monitor's own
 /// logical (DPI-independent) pixels.
@@ -121,10 +125,58 @@ pub struct Stopped {
 }
 
 pub(crate) struct Active {
-    pub(crate) child: Child,
+    pub(crate) backend: Backend,
     pub(crate) path: PathBuf,
     pub(crate) started: Instant,
     pub(crate) started_ms: u64,
+}
+
+/// The running encoder: a child process (macOS `screencapture`, ffmpeg) or
+/// the in-process Windows recorder.
+pub(crate) enum Backend {
+    Process(Child),
+    #[cfg(windows)]
+    Native(wgc::Recorder),
+}
+
+impl Backend {
+    /// Asks the encoder to finish and waits, `timeout` at most, for it to
+    /// finalise the file. A process that will not stop is killed.
+    fn finish(self, timeout: Duration) -> Result<(), String> {
+        match self {
+            Backend::Process(mut child) => {
+                signal_stop(&mut child);
+                let deadline = Instant::now() + timeout;
+                loop {
+                    match child.try_wait() {
+                        Ok(Some(_)) => return Ok(()),
+                        Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(50)),
+                        _ => {
+                            let _ = child.kill();
+                            let _ = child.wait();
+                            return Err("the encoder did not exit and was killed".into());
+                        }
+                    }
+                }
+            }
+            #[cfg(windows)]
+            Backend::Native(recorder) => recorder.stop(timeout),
+        }
+    }
+
+    /// Drops the recording at once, without finalising the file (the tests
+    /// reset the shared app between cases).
+    #[cfg(test)]
+    pub(crate) fn abandon(self) {
+        match self {
+            Backend::Process(mut child) => {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+            #[cfg(windows)]
+            Backend::Native(recorder) => recorder.abandon(),
+        }
+    }
 }
 
 #[derive(Default)]
@@ -243,8 +295,8 @@ fn start_inner<R: Runtime>(app: &AppHandle<R>, area: Area, bar: Option<Bar>) -> 
     }
 
     let path = output_path(app)?;
-    let child = match spawn_backend(app, &area, &path) {
-        Ok(child) => child,
+    let backend = match spawn_backend(app, &area, &path) {
+        Ok(backend) => backend,
         Err(e) => {
             // The name may have been reserved with an empty file.
             let _ = std::fs::remove_file(&path);
@@ -261,7 +313,7 @@ fn start_inner<R: Runtime>(app: &AppHandle<R>, area: Area, bar: Option<Bar>) -> 
         if bar.is_some() { " (bar)" } else { " (tray only)" }
     ));
     *state.active.lock().unwrap() = Some(Active {
-        child,
+        backend,
         path,
         started: Instant::now(),
         started_ms,
@@ -321,24 +373,14 @@ pub fn stop_with<R: Runtime>(app: &AppHandle<R>, outcome: Outcome) -> Result<Opt
     }
 
     let Active {
-        mut child,
+        backend,
         path,
         started,
         ..
     } = active;
-    signal_stop(&mut child);
-    let deadline = Instant::now() + Duration::from_secs(20);
-    loop {
-        match child.try_wait() {
-            Ok(Some(_)) => break,
-            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(50)),
-            _ => {
-                eprintln!("[record] encoder did not exit, killing it");
-                let _ = child.kill();
-                let _ = child.wait();
-                break;
-            }
-        }
+    let finished = backend.finish(Duration::from_secs(20));
+    if let Err(e) = &finished {
+        eprintln!("[record] {e}");
     }
     if outcome == Outcome::Discard {
         let _ = std::fs::remove_file(&path);
@@ -357,7 +399,10 @@ pub fn stop_with<R: Runtime>(app: &AppHandle<R>, outcome: Outcome) -> Result<Opt
         let _ = std::fs::remove_file(&path);
         windows::hide_recorder(app);
         let _ = app.emit("recording:stopped", Stopped { copied: false });
-        return Err("recording failed: no video was written (is screen recording allowed?)".into());
+        return Err(match finished {
+            Err(e) => format!("recording failed: {e}"),
+            Ok(()) => "recording failed: no video was written (is screen recording allowed?)".into(),
+        });
     }
     debug::log(format!(
         "recorded {} ({} bytes, {:?})",
@@ -397,11 +442,11 @@ pub fn stop_if_recording<R: Runtime>(app: &AppHandle<R>) {
     }
 }
 
-/// Where the encoder writes. ffmpeg (`-y`) overwrites, so the name is
-/// reserved with an empty file first and nothing else can take it in
-/// between. macOS `screencapture` refuses an existing path — a symlink
-/// included, so there a planted name only makes the recording fail — and
-/// gets a name that is merely free.
+/// Where the encoder writes. ffmpeg (`-y`) and the Windows encoder
+/// overwrite, so the name is reserved with an empty file first and nothing
+/// else can take it in between. macOS `screencapture` refuses an existing
+/// path — a symlink included, so there a planted name only makes the
+/// recording fail — and gets a name that is merely free.
 fn output_path<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf, String> {
     let settings = settings::current(app);
     let dir = settings::save_dir(app);
@@ -445,7 +490,7 @@ fn quiet() -> Stdio {
 }
 
 #[cfg(target_os = "macos")]
-fn spawn_backend<R: Runtime>(_app: &AppHandle<R>, area: &Area, path: &Path) -> Result<Child, String> {
+fn spawn_backend<R: Runtime>(_app: &AppHandle<R>, area: &Area, path: &Path) -> Result<Backend, String> {
     let (x, y, w, h) = area.global_logical();
     let rect = format!("{},{},{},{}", x.round(), y.round(), w.round(), h.round());
     // -v video, -x no shutter sound, -R rectangle in global points.
@@ -456,6 +501,7 @@ fn spawn_backend<R: Runtime>(_app: &AppHandle<R>, area: &Area, path: &Path) -> R
         .stdout(quiet())
         .stderr(quiet())
         .spawn()
+        .map(Backend::Process)
         .map_err(|e| format!("cannot start screencapture: {e}"))
 }
 
@@ -502,12 +548,40 @@ fn ffmpeg_binary<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf, String> {
     })
 }
 
-#[cfg(not(target_os = "macos"))]
-fn spawn_backend<R: Runtime>(app: &AppHandle<R>, area: &Area, path: &Path) -> Result<Child, String> {
-    #[cfg(target_os = "linux")]
+#[cfg(target_os = "linux")]
+fn spawn_backend<R: Runtime>(app: &AppHandle<R>, area: &Area, path: &Path) -> Result<Backend, String> {
     if windows::is_wayland() {
         return Err("Screen recording needs an X11 session; Wayland is not supported yet.".into());
     }
+    spawn_ffmpeg(app, area, path).map(Backend::Process)
+}
+
+/// The built-in recorder, unless Settings → Recording names an ffmpeg (then
+/// that one records, as before). When the built-in recorder cannot start
+/// (Windows before 10 1903, no Direct3D device or Media Foundation), an
+/// installed ffmpeg takes over.
+#[cfg(target_os = "windows")]
+fn spawn_backend<R: Runtime>(app: &AppHandle<R>, area: &Area, path: &Path) -> Result<Backend, String> {
+    if settings::current(app).ffmpeg_path.is_empty() {
+        match wgc::Recorder::start(area, path) {
+            Ok(recorder) => return Ok(Backend::Native(recorder)),
+            Err(e) => {
+                eprintln!("[record] built-in recorder: {e}");
+                if ffmpeg_binary(app).is_err() {
+                    return Err(format!(
+                        "{e}. Installing ffmpeg (Settings → Recording) gives an alternative recorder."
+                    ));
+                }
+            }
+        }
+    }
+    spawn_ffmpeg(app, area, path).map(Backend::Process)
+}
+
+/// ffmpeg grabbing the area (`gdigrab` on Windows, `x11grab` on Linux) into
+/// an H.264 MP4; `q` on stdin (Windows) or SIGINT ends it cleanly.
+#[cfg(not(target_os = "macos"))]
+fn spawn_ffmpeg<R: Runtime>(app: &AppHandle<R>, area: &Area, path: &Path) -> Result<Child, String> {
     let binary = ffmpeg_binary(app)?;
     debug::log(format!("ffmpeg: {}", binary.display()));
     let (x, y, w, h) = area.global_physical();
@@ -562,7 +636,7 @@ mod tests {
 
     fn recording(app: &AppHandle<tauri::test::MockRuntime>, path: PathBuf) {
         *app.state::<RecordState>().active.lock().unwrap() = Some(Active {
-            child: sleeping_child(),
+            backend: Backend::Process(sleeping_child()),
             path,
             started: Instant::now(),
             started_ms: 1_700_000_000_000,
@@ -796,5 +870,36 @@ mod tests {
         assert!(err.contains("not found"), "relative names are not searched: {err}");
         let err = configured_ffmpeg(dir.join("ffmpeg-dir").to_str().unwrap()).unwrap_err();
         assert!(err.contains("not an ffmpeg"), "{err}");
+    }
+
+    #[test]
+    fn a_process_backend_finishes_on_the_stop_signal_or_is_killed() {
+        // `sleep` dies of the stop signal at once.
+        let started = Instant::now();
+        assert_eq!(Backend::Process(sleeping_child()).finish(Duration::from_secs(5)), Ok(()));
+        assert!(started.elapsed() < Duration::from_secs(4));
+        Backend::Process(sleeping_child()).abandon();
+        // One that ignores it is killed when the time is up. It says when
+        // the handler is in place: a signal sent earlier would still end it.
+        #[cfg(unix)]
+        {
+            let mut stubborn = std::process::Command::new("perl")
+                .args(["-e", "$SIG{INT} = 'IGNORE'; $| = 1; print \"ready\\n\"; sleep 30"])
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .spawn()
+                .expect("perl");
+            {
+                use std::io::{BufRead, BufReader};
+                let mut line = String::new();
+                BufReader::new(stubborn.stdout.as_mut().unwrap()).read_line(&mut line).unwrap();
+                assert_eq!(line.trim(), "ready");
+            }
+            let started = Instant::now();
+            let err = Backend::Process(stubborn).finish(Duration::from_millis(300)).unwrap_err();
+            assert!(err.contains("killed"), "{err}");
+            assert!(started.elapsed() < Duration::from_secs(5));
+        }
     }
 }

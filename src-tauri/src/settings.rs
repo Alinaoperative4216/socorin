@@ -42,8 +42,9 @@ pub struct Settings {
     pub cli_triggers: bool,
     /// File name prefix for saved screenshots.
     pub file_prefix: String,
-    /// Windows / Linux: the ffmpeg binary used for recording. Empty = look
-    /// in the usual install locations, then on PATH.
+    /// Linux: the ffmpeg binary used for recording; empty = look in the
+    /// usual install locations, then on PATH. Windows: empty = the built-in
+    /// recorder, a path = record with that ffmpeg instead.
     pub ffmpeg_path: String,
     /// The first-launch welcome dialog has been dismissed.
     pub welcome_shown: bool,

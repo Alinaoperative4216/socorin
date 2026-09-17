@@ -354,7 +354,7 @@ export function Settings() {
         </p>
       </section>
 
-      {!isMac && (
+      {platform && platform.os !== "macos" && (
         <section className="card">
           <h2>Recording</h2>
           <label className="field">
@@ -362,12 +362,22 @@ export function Settings() {
             <input
               value={settings.ffmpegPath}
               onChange={(e) => update({ ffmpegPath: e.target.value })}
-              placeholder="Found automatically"
+              placeholder={platform.os === "windows" ? "Built-in recorder" : "Found automatically"}
             />
           </label>
           <p className="hint">
-            Screen recording uses ffmpeg. Leave this empty to look in the usual install locations and on PATH, or
-            enter the full path of <code>ffmpeg{platform?.os === "windows" ? ".exe" : ""}</code>.
+            {platform.os === "windows" ? (
+              <>
+                Windows 10 version 1903 and later record with the built-in recorder (Windows Graphics Capture, H.264).
+                Enter the full path of <code>ffmpeg.exe</code> to record with ffmpeg instead; an installed ffmpeg also
+                steps in when the built-in recorder is unavailable.
+              </>
+            ) : (
+              <>
+                Screen recording uses ffmpeg. Leave this empty to look in the usual install locations and on PATH, or
+                enter the full path of <code>ffmpeg</code>.
+              </>
+            )}
           </p>
         </section>
       )}

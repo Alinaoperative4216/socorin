@@ -76,7 +76,10 @@ export interface Settings {
   /** Honour --capture / --capture-full / --record / --record-full on the command line. */
   cliTriggers: boolean;
   filePrefix: string;
-  /** Windows / Linux: ffmpeg binary for recording. Empty = usual locations, then PATH. */
+  /**
+   * Linux: the ffmpeg binary for recording, empty = usual locations, then PATH.
+   * Windows: empty = the built-in recorder, a path = record with that ffmpeg.
+   */
   ffmpegPath: string;
   /** The first-launch welcome dialog has been dismissed. */
   welcomeShown: boolean;

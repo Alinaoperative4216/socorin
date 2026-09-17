@@ -10,6 +10,9 @@ mod record;
 mod settings;
 mod tray;
 mod update;
+// The Windows recorder; its geometry and pacing parts are tested everywhere.
+#[cfg_attr(not(windows), allow(dead_code))]
+mod wgc;
 mod windows;
 #[cfg(test)]
 mod test_support;

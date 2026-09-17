@@ -123,9 +123,8 @@ pub fn app_with(settings: Settings) -> TestApp {
     capture.busy.store(false, Ordering::SeqCst);
     capture.annotating.store(false, Ordering::SeqCst);
     capture.record_mode.store(false, Ordering::SeqCst);
-    if let Some(mut active) = handle.state::<RecordState>().active.lock().unwrap().take() {
-        let _ = active.child.kill();
-        let _ = active.child.wait();
+    if let Some(active) = handle.state::<RecordState>().active.lock().unwrap().take() {
+        active.backend.abandon();
     }
     let _ = handle.global_shortcut().unregister_all();
     handle.state::<crate::update::UpdateState>().reset();

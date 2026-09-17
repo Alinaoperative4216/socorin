@@ -502,7 +502,7 @@ mod tests {
         assert!(!capture::is_busy(&handle));
 
         *handle.state::<record::RecordState>().active.lock().unwrap() = Some(record::Active {
-            child: crate::test_support::sleeping_child(),
+            backend: record::Backend::Process(crate::test_support::sleeping_child()),
             path: std::path::PathBuf::from("/nonexistent/x.mov"),
             started: std::time::Instant::now(),
             started_ms: 1,

@@ -40,8 +40,9 @@ that site for a newer version once a day.
   clipboard as a file, ready to paste into a chat), *Stop* (reveals the file)
   and *Cancel* (discards it). A full-screen recording shows no bar: the tray
   icon turns red with the running time next to it, and its menu offers the
-  same three actions. macOS records with `screencapture`, Windows / Linux
-  with `ffmpeg`.
+  same three actions. macOS records with `screencapture`, Windows with the
+  built-in recorder (Windows Graphics Capture + Media Foundation, nothing to
+  install), Linux with `ffmpeg`.
 - Launch at login (on by default; switch it off in Settings), single
   instance, settings window hidden in the tray.
 - Update check once a day against `https://socorin.com/version.json` (on by
@@ -238,8 +239,14 @@ Two dev aids exist so the whole pipeline can be exercised automatically:
   Screen capture goes through the GNOME Shell screenshot D-Bus API or the
   xdg-desktop-portal, which `xcap` handles. On X11 everything works natively.
 - **Windows**: no special setup. Per-monitor DPI with mixed scale factors is
-  handled by normalising monitor geometry to logical units.
-- **Recording on Windows / Linux** uses `ffmpeg`. The app looks for it in the
+  handled by normalising monitor geometry to logical units. Recording uses
+  Windows Graphics Capture and a Media Foundation H.264 encoder
+  (hardware-accelerated where the GPU offers it) on Windows 10 version 1903
+  or later. Windows 10 draws its capture border around the recorded display;
+  Windows 11 is asked once for borderless capture. Where the built-in
+  recorder is unavailable an installed `ffmpeg` takes over, and a path under
+  *Settings → Recording* makes `ffmpeg` the recorder outright.
+- **Recording on Linux** uses `ffmpeg`. The app looks for it in the
   usual install locations and then in the absolute entries of `PATH` (never
   the working directory); *Settings → Recording* takes an explicit path when
   it lives elsewhere (it has to be the `ffmpeg` binary itself: the setting

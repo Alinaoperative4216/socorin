@@ -74,6 +74,16 @@ windows-sys = { version = "0.61", features = [
     "Win32_System_Memory",
     "Win32_System_Ole",
 ] }
+# The built-in recorder (wgc.rs): Windows.Graphics.Capture frames into a
+# Media Foundation H.264 encoder. `windows` (the crate windows-capture is
+# built on) for the borderless-capture request.
+windows-capture = "2.0.1"
+windows = { version = "0.62", features = [
+    "Foundation",
+    "Foundation_Metadata",
+    "Graphics_Capture",
+    "Security_Authorization_AppCapabilityAccess",
+] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # Same gtk Tauri links; the file clipboard (text/uri-list) goes through it.

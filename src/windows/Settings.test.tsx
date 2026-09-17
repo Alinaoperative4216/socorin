@@ -214,6 +214,28 @@ describe("Settings window", () => {
     expect(screen.getAllByText("socorin --capture")).toHaveLength(2);
   });
 
+  it("describes the built-in recorder on Windows", async () => {
+    tauri.handlers.platform_info = () => platform({ os: "windows" });
+    await mountLoaded();
+    await screen.findByText(/record with the built-in recorder/);
+    expect(screen.getByPlaceholderText("Built-in recorder")).toBeTruthy();
+    expect(screen.getByText("ffmpeg.exe")).toBeTruthy();
+    expect(screen.queryByText(/Screen recording uses ffmpeg/)).toBeNull();
+  });
+
+  it("describes ffmpeg on Linux and has no recording card on macOS", async () => {
+    tauri.handlers.platform_info = () => platform({ os: "linux" });
+    const { unmount } = await mountLoaded();
+    await screen.findByText(/Screen recording uses ffmpeg/);
+    expect(screen.getByPlaceholderText("Found automatically")).toBeTruthy();
+    unmount();
+
+    tauri.handlers.platform_info = () => platform();
+    await mountLoaded();
+    await flush();
+    expect(screen.queryByRole("heading", { name: "Recording" })).toBeNull();
+  });
+
   it("wires the footer actions", async () => {
     await mountLoaded();
     fireEvent.click(screen.getByText("Capture now"));

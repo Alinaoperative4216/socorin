@@ -72,9 +72,10 @@ Rust
   `begin_annotation` / `show_welcome` / `welcome_ready` (steals focus),
   `copy_png` with a valid PNG (overwrites the clipboard), `save_png_as`,
   `open_save_dir`, `open_screen_permission_settings`, `record::start` with
-  a valid area, `record::stop` on a non-empty file (opens Finder),
-  `tray::create`, `quit`. Use the guarded paths instead (a busy session, an
-  injected `record::Active`, an unknown monitor).
+  a valid area, `wgc::Recorder::start` (Windows: records the screen),
+  `record::stop` on a non-empty file (opens Finder), `tray::create`,
+  `quit`. Use the guarded paths instead (a busy session, an injected
+  `record::Active`, an unknown monitor).
 
 ## Pull requests
 
