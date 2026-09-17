@@ -1,5 +1,6 @@
 import type { MouseEvent as ReactMouseEvent } from "react";
 import { Check, ClipboardCopy, CloudUpload, Disc, Square, X } from "lucide-react";
+import { anchorOf, type Anchor } from "../lib/ipc";
 import { ToolbarLogo } from "../editor/Toolbar";
 
 /**
@@ -19,7 +20,8 @@ interface Props {
   onRecord?: () => void;
   onStop?: () => void;
   onStopCopy?: () => void;
-  onStopUpload?: () => void;
+  /** `anchor`: the button, where the "Link copied" popover goes. */
+  onStopUpload?: (anchor?: Anchor) => void;
   onCancel?: () => void;
 }
 
@@ -92,7 +94,7 @@ export function RecordControls({ phase, elapsedMs, onRecord, onStop, onStopCopy,
               className="tool-btn wide stop-upload"
               title="Stop and upload the video, copying its link"
               disabled={busy}
-              onClick={onStopUpload}
+              onClick={(e) => onStopUpload?.(anchorOf(e.currentTarget))}
             >
               <CloudUpload size={16} /> Stop &amp; upload
             </button>

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { ipc, shareErrorMessage, type Settings } from "../lib/ipc";
+import type { Anchor } from "../lib/ipc";
 import { isMac } from "../lib/hotkey";
 import { AnnotationStage } from "../editor/AnnotationStage";
 import { Toolbar } from "../editor/Toolbar";
@@ -147,16 +148,18 @@ export function InPlaceEditor({ source, crop, scale, hidden, onLockChange, setti
   const edit = useCallback(() => run(async () => ipc.editPng(await renderPng())), [run, renderPng]);
   // Upload & copy link: the overlay stays up ("Uploading…") until the link
   // is on the clipboard; Rust's popover announces it, so the capture ends.
+  // The popover goes under the Upload button, or under the selection when
+  // the shortcut was used.
   const upload = useCallback(
-    () =>
+    (anchor?: Anchor) =>
       run(async () => {
         const png = await renderPng();
         notify("Uploading…", true);
-        await ipc.uploadPng(png);
+        await ipc.uploadPng(png, anchor ?? { x: box.left, y: box.top, width: box.width, height: box.height });
         setToast(null);
         await ipc.endCapture();
       }),
-    [run, renderPng, notify],
+    [run, renderPng, notify, box.left, box.top, box.width, box.height],
   );
   const close = useCallback(() => void ipc.endCapture(), []);
 

@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { ipc, RECORDER_MARGIN, type RecordingStatus, type RecordingStopped } from "../lib/ipc";
+import type { Anchor } from "../lib/ipc";
 import { RecordControls, type RecordPhase } from "./RecordControls";
 
 /**
@@ -52,9 +53,9 @@ export function Recorder() {
   }, []);
 
   const elapsed = status ? Math.max(0, now - status.startedMs) : 0;
-  const stop = (action: () => Promise<void>) => () => {
+  const stop = (action: (anchor?: Anchor) => Promise<void>) => (anchor?: Anchor) => {
     setPhase("stopping");
-    void action().catch(() => setPhase("recording"));
+    void action(anchor).catch(() => setPhase("recording"));
   };
 
   return (

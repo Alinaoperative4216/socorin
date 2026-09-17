@@ -151,6 +151,7 @@ pub(crate) fn configure<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri:
             commands::reset_install_id,
             commands::share_notice,
             commands::share_ready,
+            commands::share_engaged,
             commands::dismiss_share,
             commands::quit,
         ])
@@ -175,9 +176,10 @@ fn on_window_event<R: tauri::Runtime>(window: &tauri::Window<R>, event: &tauri::
         tauri::WindowEvent::Focused(false) if window.label() == windows::UPDATE => {
             update::blurred(window.app_handle());
         }
-        // So does the "Link copied" popover.
+        // So does the "Link copied" popover, once the user has clicked into
+        // it (before that, the page's timer decides).
         tauri::WindowEvent::Focused(false) if window.label() == windows::SHARE => {
-            share::dismiss(window.app_handle());
+            share::blurred(window.app_handle());
         }
         // The editor is closed: its screenshot need not stay in memory.
         tauri::WindowEvent::Destroyed if window.label() == windows::EDITOR => {
@@ -364,7 +366,7 @@ mod tests {
         on_window_event(&popover.as_ref().window(), &tauri::WindowEvent::Destroyed);
         on_window_event(&popover.as_ref().window(), &tauri::WindowEvent::Focused(false));
         assert!(state.pending.lock().unwrap().is_some());
-        windows::show_share_notice(&app).unwrap();
+        windows::show_share_notice(&app, None).unwrap();
         let share = app.get_webview_window(windows::SHARE).unwrap();
         on_window_event(&share.as_ref().window(), &tauri::WindowEvent::Focused(false));
         assert!(state.pending.lock().unwrap().is_some());

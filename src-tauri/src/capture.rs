@@ -447,7 +447,7 @@ pub fn begin_fullscreen<R: Runtime>(app: AppHandle<R>) {
                 .or_else(|| shots.first())
                 .ok_or("no monitor")?;
             let png = encode_png(&shot.image)?;
-            deliver(&app, png)
+            deliver(&app, png, None)
         })();
         end_session(&app);
         if let Err(e) = result {
@@ -459,19 +459,32 @@ pub fn begin_fullscreen<R: Runtime>(app: AppHandle<R>) {
 
 /// Called by an overlay window once the user has drawn a rectangle.
 pub fn finish_region<R: Runtime>(app: &AppHandle<R>, region: Region) -> Result<(), String> {
-    let png = {
+    let (png, anchor) = {
         let state = app.state::<AppState>();
         let shots = state.shots.lock().unwrap();
         let shot = shots
             .iter()
             .find(|s| s.geom.id == region.monitor_id)
             .ok_or("capture session expired")?;
-        encode_png(&crop(&shot.image, region)?)?
+        (encode_png(&crop(&shot.image, region)?)?, selection_anchor(&shot.geom, region))
     };
     debug::log(format!("region {:?} -> {} bytes png", region, png.len()));
     debug::dump("crop.png", &png);
     end_session(app);
-    deliver(app, png)
+    deliver(app, png, Some(anchor))
+}
+
+/// The selection as a rectangle in screen logical pixels: where the "Link
+/// copied" popover goes after an immediate upload (there is no button to
+/// put it next to).
+fn selection_anchor(geom: &MonitorGeom, region: Region) -> crate::share::Anchor {
+    let s = f64::from(geom.scale).max(0.1);
+    crate::share::Anchor {
+        x: f64::from(geom.x) + f64::from(region.x) / s,
+        y: f64::from(geom.y) + f64::from(region.y) / s,
+        width: f64::from(region.width) / s,
+        height: f64::from(region.height) / s,
+    }
 }
 
 pub fn cancel<R: Runtime>(app: &AppHandle<R>) {
@@ -589,7 +602,7 @@ fn save_png_dialog<R: Runtime>(app: &AppHandle<R>, png: &[u8]) -> Result<Option<
 }
 
 /// Route a finished PNG according to the "after capture" setting.
-fn deliver<R: Runtime>(app: &AppHandle<R>, png: Vec<u8>) -> Result<(), String> {
+fn deliver<R: Runtime>(app: &AppHandle<R>, png: Vec<u8>, anchor: Option<crate::share::Anchor>) -> Result<(), String> {
     let settings = settings::current(app);
     match settings.after_capture {
         AfterCapture::Editor => {
@@ -612,7 +625,7 @@ fn deliver<R: Runtime>(app: &AppHandle<R>, png: Vec<u8>) -> Result<(), String> {
         AfterCapture::Upload => {
             // The upload takes a moment: a worker thread does it and the
             // popover reports the link (or the failure).
-            crate::share::share_png_async(app, png);
+            crate::share::share_png_async(app, png, anchor);
             Ok(())
         }
     }
@@ -839,6 +852,12 @@ mod session_tests {
     }
 
     #[test]
+    fn the_selection_anchor_is_the_region_in_screen_logical_pixels() {
+        let a = selection_anchor(&geom(2, 1440, -100, 800, 600, 2.0, false), region(2, 100, 50, 300, 200));
+        assert_eq!((a.x, a.y, a.width, a.height), (1490.0, -75.0, 150.0, 100.0));
+    }
+
+    #[test]
     fn finish_region_uploads_in_upload_mode() {
         let dir = temp_dir("capture-upload");
         let fake = crate::share::tests::Fake::new(crate::share::tests::TEST_CHUNK, 5_000_000);
@@ -859,6 +878,10 @@ mod session_tests {
         };
         // The link is on the server the capture went to (`valid_share_url`).
         assert_eq!(link.share_url, fake.share_url());
+        // The popover goes under the selection: image pixels (10, 10, 40 x 20
+        // at scale 2) are (5, 5, 20 x 10) on screen; centred under it and
+        // kept inside the work area.
+        assert_eq!(*app.state::<crate::share::ShareState>().placed.lock().unwrap(), Some((0.0, 15.0)));
         assert_eq!(link.kind, crate::share::Kind::Image);
         assert!(std::fs::read_dir(&dir).unwrap().next().is_none(), "nothing is saved locally");
         crate::share::dismiss(&app);

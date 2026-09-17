@@ -3,8 +3,19 @@ import { listen } from "@tauri-apps/api/event";
 import logo from "../assets/logo.svg";
 import { ipc, shareErrorMessage, type ShareNotice as Notice } from "../lib/ipc";
 
-/** How long the popover stays without anyone touching it. */
-export const LIFETIME_MS = 8000;
+/**
+ * How long the popover stays without anyone touching it (a hover holds it;
+ * once the user clicks into it, a click elsewhere closes it, see
+ * `shareEngaged`).
+ */
+export const LIFETIME_MS = 20_000;
+
+/** "60 days" / "1 day": the server's retention, or the days left when it did not say. */
+export function keptFor(expiresAt: string, retentionDays: number, now = Date.now()): string {
+  const at = Date.parse(expiresAt);
+  const days = retentionDays > 0 ? retentionDays : Number.isNaN(at) ? 0 : Math.max(1, Math.ceil((at - now) / 86_400_000));
+  return `${days} day${days === 1 ? "" : "s"}`;
+}
 
 /** "expires in 60 days" / "expires in 1 day" / "expires today" from an ISO date. */
 export function expiresIn(expiresAt: string, retentionDays: number, now = Date.now()): string {
@@ -15,11 +26,13 @@ export function expiresIn(expiresAt: string, retentionDays: number, now = Date.n
 }
 
 /**
- * The small popover under the menu bar / tray icon after "Upload & copy
- * link": the link that is now on the clipboard (Copy again / Delete from
- * server), or why there is none. Rust shows the window once the first
- * notice is on screen (`shareReady`); it goes away on Close, Escape, a
- * click elsewhere, or by itself after `LIFETIME_MS` (a hover holds it).
+ * The small popover next to the button that was clicked (under the menu
+ * bar / tray icon when there was none) after "Upload & copy link": the link
+ * that is now on the clipboard (Copy again / Delete from server) and when
+ * the server deletes the file, or why there is none. Rust shows the window
+ * once the first notice is on screen (`shareReady`); it goes away on Close,
+ * Escape, by itself after `LIFETIME_MS` (a hover holds it), or, once the
+ * user has clicked into it, on a click elsewhere.
  */
 export function ShareNotice() {
   const [notice, setNotice] = useState<Notice | null>(null);
@@ -29,8 +42,15 @@ export function ShareNotice() {
   const shown = useRef(false);
   const timer = useRef<number | undefined>(undefined);
   const hovering = useRef(false);
+  const engaged = useRef(false);
 
   const dismiss = useCallback(() => void ipc.dismissShare(), []);
+  // The first click into the popover: from now on a click elsewhere closes it.
+  const engage = useCallback(() => {
+    if (engaged.current) return;
+    engaged.current = true;
+    void ipc.shareEngaged();
+  }, []);
 
   const arm = useCallback(() => {
     window.clearTimeout(timer.current);
@@ -45,6 +65,7 @@ export function ShareNotice() {
       setNotice(n ?? null);
       setStatus(null);
       setDeleted(false);
+      engaged.current = false;
       if (n) arm();
     };
     ipc.shareNotice().then(fresh).catch(() => {});
@@ -125,7 +146,14 @@ export function ShareNotice() {
         <code className="share-link" title={link.shareUrl}>
           {link.shareUrl}
         </code>
-        <p>{status ? status.text : "Paste it anywhere. Anyone with the link can open the file until it expires."}</p>
+        {status ? (
+          <p>{status.text}</p>
+        ) : (
+          <p className="share-warning">
+            Anyone with the link can open the file.{" "}
+            <strong>It is deleted from the server after {keptFor(link.expiresAt, retentionDays)} at the latest.</strong>
+          </p>
+        )}
         <div className="row">
           <button
             type="button"
@@ -164,6 +192,7 @@ export function ShareNotice() {
   return (
     <div
       className="update-notice share-notice"
+      onMouseDown={engage}
       onMouseEnter={() => {
         hovering.current = true;
       }}

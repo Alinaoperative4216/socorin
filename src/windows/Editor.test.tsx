@@ -76,13 +76,17 @@ describe("Editor window", () => {
     tauri.handlers.upload_png = () => new Promise((r) => (finish = r));
     fireEvent.click(screen.getByTitle("Upload & copy link (Ctrl/⌘+Shift+U)"));
     await screen.findByText("Uploading…");
-    expect(tauri.invoke).toHaveBeenLastCalledWith("upload_png", expect.any(Uint8Array), undefined);
+    // The clicked button rides along as a header, for the popover.
+    expect(tauri.invoke).toHaveBeenLastCalledWith("upload_png", expect.any(Uint8Array), {
+      headers: { "x-socorin-anchor": '{"x":0,"y":0,"width":0,"height":0}' },
+    });
     finish({ id: "x", shareUrl: "https://socorin.com/s/x" });
     await screen.findByText("Link copied");
 
     tauri.handlers.upload_png = () => Promise.reject({ code: "rate_limited", message: "Too many uploads for now. Try again in 30 seconds.", retryAfterSeconds: 30 });
     fireEvent.keyDown(window, { key: "U", shiftKey: true, ...mod });
     const toast = await screen.findByText("Too many uploads for now. Try again in 30 seconds.");
+    expect(tauri.invoke).toHaveBeenLastCalledWith("upload_png", expect.any(Uint8Array), undefined); // no button to anchor to
     expect(toast.className).toContain("error");
     expect(tauri.calls("upload_png")).toHaveLength(2);
   });

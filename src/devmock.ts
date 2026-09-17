@@ -175,7 +175,7 @@ const handlers: Record<string, Handler> = {
   stop_recording: async () => console.log("[mock] stop_recording"),
   stop_recording_copy: async () => console.log("[mock] stop_recording_copy"),
   cancel_recording: async () => console.log("[mock] cancel_recording"),
-  stop_recording_upload: async () => console.log("[mock] stop_recording_upload"),
+  stop_recording_upload: async (args) => console.log("[mock] stop_recording_upload", JSON.stringify(args)),
   recording_status: async () => ({ recording: true, startedMs: Date.now() - 65_000, path: "/Users/mock/Pictures/Screenshots/Screenshot.mov" }),
   upload_png: async (args) => {
     console.log("[mock] upload_png", (args as ArrayBuffer).byteLength, "bytes");
@@ -195,6 +195,7 @@ const handlers: Record<string, Handler> = {
   share_notice: async () => mockShareNotice(),
   share_ready: async () => undefined,
   dismiss_share: async () => console.log("[mock] dismiss_share"),
+  share_engaged: async () => console.log("[mock] share_engaged"),
   default_save_dir: async () => "/Users/mock/Pictures/Screenshots",
   save_png: async (args) => {
     const bytes = args instanceof Uint8Array ? args.byteLength : (args as ArrayBuffer).byteLength;

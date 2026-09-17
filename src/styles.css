@@ -385,12 +385,21 @@ html[data-window="share"] body {
   display: block;
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 12px;
+  line-height: 1.4;
   color: var(--text);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  /* The whole link, wrapped when it has to be: never cut to "…". */
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-all;
+  max-height: 51px;
+  overflow-y: auto;
   user-select: text;
   -webkit-user-select: text;
+}
+
+.share-warning strong {
+  font-weight: 600;
+  color: var(--text);
 }
 
 /* What the share server said for itself, kept visibly apart from the app's

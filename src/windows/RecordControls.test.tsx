@@ -46,6 +46,7 @@ describe("RecordControls", () => {
     fireEvent.click(screen.getByTitle("Discard the recording"));
     expect(onStopCopy).toHaveBeenCalledTimes(1);
     expect(onStopUpload).toHaveBeenCalledTimes(1);
+    expect(onStopUpload).toHaveBeenCalledWith({ x: 0, y: 0, width: 0, height: 0 }); // the button, for the popover
     expect(onStop).toHaveBeenCalledTimes(1);
     expect(onCancel).toHaveBeenCalledTimes(1);
     const labels = screen.getAllByRole("button").map((b) => b.textContent?.trim());

@@ -130,6 +130,10 @@ describe("InPlaceEditor", () => {
     fireEvent.click(screen.getByTitle("Upload & copy link (Ctrl/⌘+Shift+U)"));
     await waitFor(() => expect(tauri.calls("upload_png")).toHaveLength(1));
     expect(tauri.calls("upload_png")[0]).toBeInstanceOf(Uint8Array);
+    // The button's place rides along as a header, for the popover (jsdom
+    // lays nothing out: all zeros).
+    const headers = (tauri.invoke.mock.calls.find((c) => c[0] === "upload_png")![2] as { headers: Record<string, string> }).headers;
+    expect(JSON.parse(headers["x-socorin-anchor"])).toEqual({ x: 0, y: 0, width: 0, height: 0 });
     const toast = container.querySelector(".inplace-toast") as HTMLElement;
     expect(toast.textContent).toBe("Uploading…");
     expect(toast.className).toContain("info");

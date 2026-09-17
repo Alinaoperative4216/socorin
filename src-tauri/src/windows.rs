@@ -10,7 +10,7 @@ use tauri::{
 
 use crate::{
     capture::{self, MonitorGeom, MonitorInfo},
-    debug, record,
+    debug, record, share,
 };
 
 
@@ -334,14 +334,75 @@ pub const UPDATE_MARGIN: f64 = 16.0;
 /// It is never focused when shown, so the user's work keeps the keyboard;
 /// once clicked, a click elsewhere hides it again (`update::blurred`).
 pub fn show_update_notice<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
-    show_popover(app, UPDATE, "Socorin update", UPDATE_SIZE)
+    show_popover(app, UPDATE, "Socorin update", UPDATE_SIZE, update_notice_position(app))
 }
 
 /// The "Link copied" popover after an upload (`share::announce`): the same
 /// window as the update notice, under the same icon, with its own label so
 /// the two never fight over one window.
-pub fn show_share_notice<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
-    show_popover(app, SHARE, "Socorin share", SHARE_SIZE)
+///
+/// `anchor`: the button that was clicked (or the selection), in screen
+/// logical pixels; the popover goes right under it (above it in the lower
+/// half of the screen), like the update notice goes under the icon.
+pub fn show_share_notice<R: Runtime>(app: &AppHandle<R>, anchor: Option<share::Anchor>) -> Result<(), String> {
+    let position = match anchor {
+        Some(a) => place((a.x, a.y, a.width, a.height), work_area_around(app, &a), SHARE_SIZE),
+        None => update_notice_position(app),
+    };
+    #[cfg(test)]
+    {
+        *app.state::<share::ShareState>().placed.lock().unwrap() = Some(position);
+    }
+    show_popover(app, SHARE, "Socorin share", SHARE_SIZE, position)
+}
+
+/// A page's anchor (CSS pixels of `window`) as screen logical pixels.
+/// `None` for values that make no sense: a page is not trusted to put a
+/// window anywhere it likes.
+pub fn anchor_on_screen<R: Runtime>(window: &tauri::Window<R>, a: share::Anchor) -> Option<share::Anchor> {
+    let sane = |v: f64| v.is_finite() && v.abs() < 100_000.0;
+    if !(sane(a.x) && sane(a.y) && sane(a.width) && sane(a.height)) || a.width < 0.0 || a.height < 0.0 {
+        return None;
+    }
+    let scale = window.scale_factor().ok()?.max(0.1);
+    let origin = window.inner_position().ok()?;
+    Some(share::Anchor {
+        x: origin.x as f64 / scale + a.x,
+        y: origin.y as f64 / scale + a.y,
+        width: a.width,
+        height: a.height,
+    })
+}
+
+/// The work area of the monitor the anchor's centre is on (logical), the
+/// primary monitor's failing that.
+fn work_area_around<R: Runtime>(app: &AppHandle<R>, a: &share::Anchor) -> (f64, f64, f64, f64) {
+    // The mock runtime has no monitors (its monitor calls panic).
+    #[cfg(test)]
+    {
+        let _ = (app, a);
+        TEST_WORK_AREA
+    }
+    #[cfg(not(test))]
+    real_work_area_around(app, a)
+}
+
+#[cfg(test)]
+pub const TEST_WORK_AREA: (f64, f64, f64, f64) = (0.0, 0.0, 1440.0, 900.0);
+
+#[cfg(not(test))]
+fn real_work_area_around<R: Runtime>(app: &AppHandle<R>, a: &share::Anchor) -> (f64, f64, f64, f64) {
+    let (cx, cy) = (a.x + a.width / 2.0, a.y + a.height / 2.0);
+    let on = app.available_monitors().unwrap_or_default().into_iter().find(|m| {
+        let s = m.scale_factor().max(0.1);
+        let (mx, my) = (m.position().x as f64 / s, m.position().y as f64 / s);
+        let (mw, mh) = (m.size().width as f64 / s, m.size().height as f64 / s);
+        cx >= mx && cx < mx + mw && cy >= my && cy < my + mh
+    });
+    match on.or_else(|| app.primary_monitor().ok().flatten()) {
+        Some(monitor) => logical_work_area(&monitor),
+        None => (0.0, 0.0, f64::MAX / 4.0, f64::MAX / 4.0),
+    }
 }
 
 pub fn reveal_share_notice<R: Runtime>(app: &AppHandle<R>) {
@@ -356,14 +417,14 @@ pub fn hide_share_notice<R: Runtime>(app: &AppHandle<R>) {
     }
 }
 
-/// Logical size of the share popover (a bit taller than the update one:
-/// the link line and three buttons).
-pub const SHARE_SIZE: (f64, f64) = (392.0, 186.0);
+/// Logical size of the share popover (wider and taller than the update
+/// one: the whole link on one line, the retention warning, three buttons).
+pub const SHARE_SIZE: (f64, f64) = (480.0, 216.0);
 
 /// A popover window under the menu bar / tray icon, created hidden once and
 /// reused (see `show_update_notice` for how it is revealed).
-fn show_popover<R: Runtime>(app: &AppHandle<R>, label: &str, title: &str, size: (f64, f64)) -> Result<(), String> {
-    let (x, y) = update_notice_position(app);
+fn show_popover<R: Runtime>(app: &AppHandle<R>, label: &str, title: &str, size: (f64, f64), position: (f64, f64)) -> Result<(), String> {
+    let (x, y) = position;
     if let Some(window) = app.get_webview_window(label) {
         let _ = window.set_position(LogicalPosition::new(x, y));
         let _ = window.show();
@@ -644,12 +705,48 @@ mod tests {
         // The share popover is its own window of the same kind.
         reveal_share_notice(&app);
         hide_share_notice(&app);
-        show_share_notice(&app).unwrap();
+        show_share_notice(&app, None).unwrap();
         assert!(app.get_webview_window(SHARE).is_some());
         reveal_share_notice(&app);
         hide_share_notice(&app);
-        show_share_notice(&app).unwrap(); // reused
+        show_share_notice(&app, None).unwrap(); // reused
         assert_eq!(app.webview_windows().values().filter(|w| w.label() == SHARE).count(), 1);
         assert!(SHARE_SIZE.1 > UPDATE_SIZE.1);
+    }
+
+    #[test]
+    fn the_share_popover_sits_under_the_anchor_it_was_given() {
+        use crate::share::{Anchor, ShareState};
+        let app = app();
+        let state = app.state::<ShareState>();
+        let (w, h) = SHARE_SIZE;
+        // Under a button in the upper half, centred; above one in the lower half.
+        show_share_notice(&app, Some(Anchor { x: 700.0, y: 200.0, width: 100.0, height: 30.0 })).unwrap();
+        assert_eq!(*state.placed.lock().unwrap(), Some((750.0 - w / 2.0, 230.0)));
+        show_share_notice(&app, Some(Anchor { x: 700.0, y: 800.0, width: 100.0, height: 30.0 })).unwrap();
+        assert_eq!(*state.placed.lock().unwrap(), Some((750.0 - w / 2.0, 800.0 - h)));
+        // Never outside the work area.
+        show_share_notice(&app, Some(Anchor { x: 1430.0, y: 10.0, width: 10.0, height: 10.0 })).unwrap();
+        assert_eq!(*state.placed.lock().unwrap(), Some((1440.0 - w, 20.0)));
+        // Without one: under the icon, like the update notice.
+        show_share_notice(&app, None).unwrap();
+        assert_eq!(*state.placed.lock().unwrap(), Some((UPDATE_MARGIN, UPDATE_MARGIN)));
+
+        // A page's anchor is taken relative to its window (the mock runtime
+        // puts every window at the origin, scale 1), and only when it makes
+        // sense.
+        let window = app.get_webview_window(SHARE).unwrap();
+        let window = window.as_ref().window();
+        let a = Anchor { x: 10.0, y: 20.0, width: 30.0, height: 40.0 };
+        assert_eq!(anchor_on_screen(&window, a), Some(a));
+        for bad in [
+            Anchor { x: f64::NAN, ..a },
+            Anchor { y: f64::INFINITY, ..a },
+            Anchor { width: -1.0, ..a },
+            Anchor { x: 1e9, ..a },
+        ] {
+            assert_eq!(anchor_on_screen(&window, bad), None, "{bad:?}");
+        }
+        hide_share_notice(&app);
     }
 }

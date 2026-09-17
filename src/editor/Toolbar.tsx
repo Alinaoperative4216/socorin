@@ -22,6 +22,7 @@ import {
   ZoomIn,
   ZoomOut,
 } from "lucide-react";
+import { anchorOf, type Anchor } from "../lib/ipc";
 import type { ComponentType, MouseEvent as ReactMouseEvent } from "react";
 import logo from "../assets/logo.svg";
 import { COLORS, STROKE_LEVELS, type ToolId } from "./types";
@@ -68,8 +69,8 @@ interface Props {
   onCopy: () => void;
   onSave: () => void;
   onSaveAs: () => void;
-  /** "Upload & copy link": the PNG goes to the share server. */
-  onUpload: () => void;
+  /** "Upload & copy link": the PNG goes to the share server; `anchor` is the button, for the popover. */
+  onUpload: (anchor?: Anchor) => void;
   onClose: () => void;
   /** Floating variant (in-place editor): no zoom controls, tools toggle off. */
   floating?: boolean;
@@ -174,7 +175,7 @@ export function Toolbar(p: Props) {
       <button type="button" className="tool-btn wide" title="Save as… (Ctrl/⌘+Shift+S)" disabled={p.busy} onClick={p.onSaveAs}>
         <FolderDown size={16} /> Save as
       </button>
-      <button type="button" className="tool-btn wide" title="Upload & copy link (Ctrl/⌘+Shift+U)" disabled={p.busy} onClick={p.onUpload}>
+      <button type="button" className="tool-btn wide" title="Upload & copy link (Ctrl/⌘+Shift+U)" disabled={p.busy} onClick={(e) => p.onUpload(anchorOf(e.currentTarget))}>
         <CloudUpload size={16} /> Upload
       </button>
       <button

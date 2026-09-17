@@ -142,6 +142,24 @@ export type ShareNotice =
   | { kind: "shared"; link: SharedLink; retentionDays: number }
   | { kind: "failed"; error: ShareError };
 
+/**
+ * Where the "Link copied" popover goes: the button that was clicked (or the
+ * selection), as a rectangle in this window's CSS pixels. Rust makes it
+ * absolute (`windows::anchor_on_screen`) and puts the popover right under it.
+ */
+export interface Anchor {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+/** The anchor for an element, e.g. a click's `currentTarget`. */
+export function anchorOf(el: Element): Anchor {
+  const r = el.getBoundingClientRect();
+  return { x: r.left, y: r.top, width: r.width, height: r.height };
+}
+
 /** The sentence for a rejected share command (a `ShareError`, or any other error). */
 export function shareErrorMessage(e: unknown): string {
   if (e && typeof e === "object" && "message" in e && typeof (e as ShareError).message === "string") {
@@ -230,7 +248,7 @@ export const ipc = {
   /** Stop and put the file on the clipboard. */
   stopRecordingCopy: () => invoke<void>("stop_recording_copy"),
   /** Stop, upload the file to the share server and put the link on the clipboard. */
-  stopRecordingUpload: () => invoke<void>("stop_recording_upload"),
+  stopRecordingUpload: (anchor?: Anchor) => invoke<void>("stop_recording_upload", { anchor }),
   /** Stop and delete the file. */
   cancelRecording: () => invoke<void>("cancel_recording"),
   recordingStatus: () => invoke<RecordingStatus>("recording_status"),
@@ -257,7 +275,8 @@ export const ipc = {
    * Uploads PNG bytes to the share server, puts the link on the clipboard
    * and shows the popover. Rejects with a `ShareError`.
    */
-  uploadPng: (png: Uint8Array) => invoke<SharedLink>("upload_png", png),
+  uploadPng: (png: Uint8Array, anchor?: Anchor) =>
+    invoke<SharedLink>("upload_png", png, anchor && { headers: { "x-socorin-anchor": JSON.stringify(anchor) } }),
   /** The remembered links, newest first. */
   shareHistory: () => invoke<SharedLink[]>("share_history"),
   /** "Delete from server" for a remembered link. Rejects with a `ShareError`. */
@@ -271,6 +290,8 @@ export const ipc = {
   shareReady: () => invoke<void>("share_ready"),
   /** Close the share popover. */
   dismissShare: () => invoke<void>("dismiss_share"),
+  /** The user clicked into the popover: a click elsewhere closes it from now on. */
+  shareEngaged: () => invoke<void>("share_engaged"),
   quit: () => invoke<void>("quit"),
 };
 

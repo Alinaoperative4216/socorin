@@ -33,7 +33,10 @@
 
 use std::{
     path::Path,
-    sync::Mutex,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Mutex,
+    },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -260,15 +263,43 @@ pub enum Notice {
     Failed { error: ShareError },
 }
 
+/// Where the popover goes: the button that was just clicked, or the
+/// selection, as a rectangle (x, y, width, height). A page sends it in its
+/// own window's CSS pixels; `windows::anchor_on_screen` turns that into
+/// screen logical pixels, which is what `announce` takes.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Anchor {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+}
+
 #[derive(Default)]
 pub struct ShareState {
     /// The limits fetched this run, and the server they came from.
     limits: Mutex<Option<(String, Limits)>>,
     notice: Mutex<Option<Notice>>,
+    /// Where the next recording's popover goes (`stop_recording_upload`
+    /// hands it over before the stop, `record::stop_with` takes it).
+    anchor: Mutex<Option<Anchor>>,
+    /// The user has clicked into the popover: from then on a click
+    /// elsewhere closes it (`blurred`). Before that, losing focus means
+    /// nothing: the overlay going away after an upload can make the
+    /// popover the key window without anyone asking for it.
+    engaged: AtomicBool,
     /// What would have gone to the clipboard (the tests never write the
     /// real one).
     #[cfg(test)]
     pub(crate) copied: Mutex<Vec<String>>,
+    /// Where the popover was last placed (the mock runtime has no real
+    /// window positions).
+    #[cfg(test)]
+    pub(crate) placed: Mutex<Option<(f64, f64)>>,
+    /// How often the popover was dismissed (the mock runtime hides nothing).
+    #[cfg(test)]
+    pub(crate) dismissed: std::sync::atomic::AtomicUsize,
 }
 
 // ---- formatting ----
@@ -959,16 +990,21 @@ pub fn copy_text<R: Runtime>(app: &AppHandle<R>, text: &str) -> Result<(), Strin
 /// action for a PNG, from any page. The pages get the outcome back as
 /// well, for their own toast — as a `PublicLink`, so the delete token
 /// stays on the Rust side (deleting goes by id, `delete_share`).
-pub async fn share_png<R: Runtime>(app: &AppHandle<R>, png: Vec<u8>) -> Result<PublicLink, ShareError> {
+pub async fn share_png<R: Runtime>(app: &AppHandle<R>, png: Vec<u8>, anchor: Option<Anchor>) -> Result<PublicLink, ShareError> {
     let name = format!("{}_{}.png", settings::current(app).file_prefix, crate::capture::time_stamp());
     let outcome = upload(app, png, Kind::Image, "image/png", Some(name)).await;
-    announce(app, outcome)
+    announce(app, outcome, anchor)
 }
 
 /// Copy the link and show the popover (or show the failure), and hand the
 /// outcome back for the caller. Copying can fail on its own; then the
-/// upload still happened and the popover offers the link.
-pub fn announce<R: Runtime>(app: &AppHandle<R>, outcome: Result<SharedLink, ShareError>) -> Result<PublicLink, ShareError> {
+/// upload still happened and the popover offers the link. `anchor`: where
+/// the popover goes (screen logical pixels), under the icon without one.
+pub fn announce<R: Runtime>(
+    app: &AppHandle<R>,
+    outcome: Result<SharedLink, ShareError>,
+    anchor: Option<Anchor>,
+) -> Result<PublicLink, ShareError> {
     let notice = match &outcome {
         Ok(link) => {
             if let Err(e) = copy_text(app, &link.share_url) {
@@ -989,20 +1025,48 @@ pub fn announce<R: Runtime>(app: &AppHandle<R>, outcome: Result<SharedLink, Shar
             Notice::Failed { error: e.clone() }
         }
     };
-    *app.state::<ShareState>().notice.lock().unwrap() = Some(notice.clone());
+    let state = app.state::<ShareState>();
+    *state.notice.lock().unwrap() = Some(notice.clone());
+    state.engaged.store(false, Ordering::SeqCst);
     let _ = app.emit(NOTICE_EVENT, &notice);
-    if let Err(e) = windows::show_share_notice(app) {
+    if let Err(e) = windows::show_share_notice(app, anchor) {
         eprintln!("[share] {e}");
     }
     outcome.map(|link| link.public())
 }
 
+/// Where the popover of the recording that is about to stop goes
+/// (`stop_recording_upload` knows the button, `record::stop_with` the
+/// outcome).
+pub fn set_anchor<R: Runtime>(app: &AppHandle<R>, anchor: Option<Anchor>) {
+    *app.state::<ShareState>().anchor.lock().unwrap() = anchor;
+}
+
+pub fn take_anchor<R: Runtime>(app: &AppHandle<R>) -> Option<Anchor> {
+    app.state::<ShareState>().anchor.lock().unwrap().take()
+}
+
+/// The user clicked into the popover (`share_engaged`): a click elsewhere
+/// closes it from now on.
+pub fn engaged<R: Runtime>(app: &AppHandle<R>) {
+    app.state::<ShareState>().engaged.store(true, Ordering::SeqCst);
+}
+
+/// The popover lost focus: it goes away, but only once the user has
+/// engaged with it (see `ShareState::engaged`); until then the timer in
+/// the page decides.
+pub fn blurred<R: Runtime>(app: &AppHandle<R>) {
+    if app.state::<ShareState>().engaged.load(Ordering::SeqCst) {
+        dismiss(app);
+    }
+}
+
 /// "After capture: upload" — the PNG goes up on a worker thread; the
 /// popover reports the outcome.
-pub fn share_png_async<R: Runtime>(app: &AppHandle<R>, png: Vec<u8>) {
+pub fn share_png_async<R: Runtime>(app: &AppHandle<R>, png: Vec<u8>, anchor: Option<Anchor>) {
     let app = app.clone();
     std::thread::spawn(move || {
-        let outcome = tauri::async_runtime::block_on(share_png(&app, png));
+        let outcome = tauri::async_runtime::block_on(share_png(&app, png, anchor));
         if outcome.is_ok() {
             let _ = app.emit("capture-done", "link");
         }
@@ -1016,6 +1080,10 @@ pub fn notice<R: Runtime>(app: &AppHandle<R>) -> Option<Notice> {
 
 /// Close, Escape, a click elsewhere or the timer: hide the popover.
 pub fn dismiss<R: Runtime>(app: &AppHandle<R>) {
+    let state = app.state::<ShareState>();
+    state.engaged.store(false, Ordering::SeqCst);
+    #[cfg(test)]
+    state.dismissed.fetch_add(1, Ordering::SeqCst);
     windows::hide_share_notice(app);
 }
 
@@ -1024,7 +1092,11 @@ pub(crate) fn reset<R: Runtime>(app: &AppHandle<R>) {
     let state = app.state::<ShareState>();
     *state.limits.lock().unwrap() = None;
     *state.notice.lock().unwrap() = None;
+    *state.anchor.lock().unwrap() = None;
+    state.engaged.store(false, Ordering::SeqCst);
     state.copied.lock().unwrap().clear();
+    *state.placed.lock().unwrap() = None;
+    state.dismissed.store(0, Ordering::SeqCst);
     if let Some(path) = history_file(app) {
         let _ = std::fs::remove_file(path);
     }
@@ -1805,7 +1877,7 @@ pub(crate) mod tests {
         let handle = app.handle().clone();
         assert_eq!(notice(&handle), None);
 
-        let result = run(share_png(&handle, png(10))).unwrap();
+        let result = run(share_png(&handle, png(10), None)).unwrap();
         assert_eq!(result.share_url, fake.share_url());
         // What the page is handed carries no delete token (D-5).
         let as_json = serde_json::to_value(&result).unwrap();
@@ -1826,7 +1898,7 @@ pub(crate) mod tests {
 
         // A failure is announced as well, and nothing is copied.
         point_at(&handle, "http://127.0.0.1:9");
-        let e = run(share_png(&handle, png(10))).unwrap_err();
+        let e = run(share_png(&handle, png(10), None)).unwrap_err();
         assert_eq!(e.code, "network");
         let Some(Notice::Failed { error }) = notice(&handle) else { panic!() };
         assert_eq!(error, e);
@@ -1837,7 +1909,7 @@ pub(crate) mod tests {
 
         // The asynchronous flavour ("after capture: upload") reports the same way.
         point_at(&handle, &base);
-        share_png_async(&handle, png(10));
+        share_png_async(&handle, png(10), None);
         for _ in 0..300 {
             if matches!(notice(&handle), Some(Notice::Shared { .. })) {
                 break;
@@ -1845,6 +1917,47 @@ pub(crate) mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
         assert!(matches!(notice(&handle), Some(Notice::Shared { .. })));
+        dismiss(&handle);
+    }
+
+    #[test]
+    fn the_popover_sits_at_the_anchor_and_only_a_click_into_it_arms_the_blur() {
+        let fake = Fake::new(TEST_CHUNK, 5000);
+        let base = serve_fake(&fake);
+        let app = app_for(&base, "share-anchor");
+        let handle = app.handle().clone();
+        let state = handle.state::<ShareState>();
+
+        // The button that was clicked, in screen logical pixels: the
+        // popover is centred right under it (`windows::place`).
+        let button = Anchor { x: 300.0, y: 100.0, width: 80.0, height: 30.0 };
+        run(share_png(&handle, png(10), Some(button))).unwrap();
+        let (w, _) = windows::SHARE_SIZE;
+        assert_eq!(*state.placed.lock().unwrap(), Some((300.0 + 40.0 - w / 2.0, 130.0)));
+        // Without one it goes under the menu bar / tray icon as before.
+        run(share_png(&handle, png(10), None)).unwrap();
+        assert_eq!(*state.placed.lock().unwrap(), Some((windows::UPDATE_MARGIN, windows::UPDATE_MARGIN)));
+
+        // Losing focus closes it only after the user clicked into it;
+        // dismissing and a new link disarm that again.
+        assert_eq!(state.dismissed.load(Ordering::SeqCst), 0);
+        blurred(&handle);
+        assert_eq!(state.dismissed.load(Ordering::SeqCst), 0, "not engaged: the page's timer decides");
+        engaged(&handle);
+        blurred(&handle);
+        assert_eq!(state.dismissed.load(Ordering::SeqCst), 1);
+        blurred(&handle);
+        assert_eq!(state.dismissed.load(Ordering::SeqCst), 1, "dismissing disarms it");
+        engaged(&handle);
+        run(share_png(&handle, png(10), None)).unwrap();
+        blurred(&handle);
+        assert_eq!(state.dismissed.load(Ordering::SeqCst), 1, "a fresh notice disarms it");
+
+        // The recording path hands its anchor over through the state.
+        assert_eq!(take_anchor(&handle), None);
+        set_anchor(&handle, Some(button));
+        assert_eq!(take_anchor(&handle), Some(button));
+        assert_eq!(take_anchor(&handle), None, "taken once");
         dismiss(&handle);
     }
 

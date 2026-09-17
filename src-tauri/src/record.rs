@@ -434,7 +434,7 @@ pub fn stop_with<R: Runtime>(app: &AppHandle<R>, outcome: Outcome) -> Result<Opt
     let (path, link) = if outcome == Outcome::Upload {
         let _ = app.emit("recording:uploading", ());
         let (path, outcome) = upload_recording(app, path);
-        let link = share::announce(app, outcome).ok().map(|r| r.share_url);
+        let link = share::announce(app, outcome, share::take_anchor(app)).ok().map(|r| r.share_url);
         (path, link)
     } else {
         (path, None)
@@ -1198,8 +1198,13 @@ mod tests {
         let path = dir.join("clip.mp4");
         std::fs::write(&path, vec![7u8; 200]).unwrap();
         recording(&app, path.clone());
+        // Where "Stop & upload" was clicked: the popover goes right under it.
+        share::set_anchor(&app, Some(share::Anchor { x: 600.0, y: 40.0, width: 100.0, height: 30.0 }));
 
         assert_eq!(stop_with(&app, Outcome::Upload).unwrap(), Some(path.clone()));
+        let (w, _) = crate::windows::SHARE_SIZE;
+        assert_eq!(*app.state::<share::ShareState>().placed.lock().unwrap(), Some((650.0 - w / 2.0, 70.0)));
+        assert_eq!(share::take_anchor(&app), None, "used up");
         assert!(!is_recording(&app));
         assert!(path.exists(), "the recording stays on disk");
         let Some(share::Notice::Shared { link, .. }) = share::notice(&app) else { panic!("{:?}", share::notice(&app)) };

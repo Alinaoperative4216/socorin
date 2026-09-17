@@ -73,7 +73,8 @@ describe("Recorder bar", () => {
     expect(tauri.calls("cancel_recording")).toHaveLength(1);
     act(() => tauri.emit("recording:started", { recording: true, startedMs: Date.now(), path: "/tmp/c.mov" }));
     fireEvent.click(screen.getByTitle("Stop and upload the video, copying its link"));
-    expect(tauri.calls("stop_recording_upload")).toHaveLength(1);
+    // The button's place rides along, for the popover (jsdom: all zeros).
+    expect(tauri.calls("stop_recording_upload")).toEqual([{ anchor: { x: 0, y: 0, width: 0, height: 0 } }]);
     expect((screen.getByTitle("Stop recording") as HTMLButtonElement).disabled).toBe(true);
   });
 

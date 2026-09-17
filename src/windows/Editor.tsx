@@ -2,6 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { listen } from "@tauri-apps/api/event";
 import { ipc, shareErrorMessage, type Settings } from "../lib/ipc";
+import type { Anchor } from "../lib/ipc";
 import { isMac } from "../lib/hotkey";
 import { AnnotationStage } from "../editor/AnnotationStage";
 import { Toolbar, TOOLS } from "../editor/Toolbar";
@@ -169,12 +170,13 @@ export function Editor() {
 
   // Upload & copy link: Rust copies the link and shows the popover; the
   // status bar says so as well while this window has the eye.
+  // `anchor`: the Upload button, where the popover goes (none from the shortcut).
   const upload = useCallback(
-    () =>
+    (anchor?: Anchor) =>
       run(async () => {
         const png = await a.renderPng();
         notify("Uploading…");
-        await ipc.uploadPng(png);
+        await ipc.uploadPng(png, anchor);
         notify("Link copied");
       }),
     [run, a.renderPng, notify],

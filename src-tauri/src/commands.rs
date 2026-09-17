@@ -163,6 +163,15 @@ fn raw_body(request: &Request<'_>) -> Result<Vec<u8>, String> {
     }
 }
 
+/// The `x-socorin-anchor` header of an upload: the clicked button as JSON
+/// `{ x, y, width, height }` in the page's CSS pixels, made absolute. A
+/// missing or unreadable one only means the popover goes under the icon.
+fn anchor_header<R: Runtime>(window: &tauri::Window<R>, request: &Request<'_>) -> Option<share::Anchor> {
+    let raw = request.headers().get("x-socorin-anchor")?.to_str().ok()?;
+    let anchor: share::Anchor = serde_json::from_str(raw).ok()?;
+    windows::anchor_on_screen(window, anchor)
+}
+
 /// Body: PNG bytes, written to a new auto-named file in the save dir.
 /// Returns the path. There is deliberately no way to name the destination:
 /// a webview that could would be able to write a `.png` anywhere the user
@@ -249,8 +258,11 @@ pub fn stop_recording_copy<R: Runtime>(app: AppHandle<R>) {
 
 /// Stop, upload the file to the share server and put the link on the
 /// clipboard (the popover reports the outcome).
+/// `anchor`: the "Stop & upload" button in the bar's CSS pixels, where
+/// the popover goes.
 #[tauri::command]
-pub fn stop_recording_upload<R: Runtime>(app: AppHandle<R>) {
+pub fn stop_recording_upload<R: Runtime>(app: AppHandle<R>, window: tauri::Window<R>, anchor: Option<share::Anchor>) {
+    share::set_anchor(&app, anchor.and_then(|a| windows::anchor_on_screen(&window, a)));
     record::stop_async_with(app, record::Outcome::Upload);
 }
 
@@ -448,15 +460,20 @@ pub fn update_ready<R: Runtime>(app: AppHandle<R>) {
 
 // ---- sharing ----
 
-/// Body: PNG bytes. Uploads it to the share server, puts the link on the
-/// clipboard and shows the popover. Resolves to the link without its delete
-/// token (a `PublicLink`, as the history and the popover get it); a failure
-/// comes back as a `ShareError` (`{ code, message, … }`) for the page's
-/// toast.
+/// Body: PNG bytes; header `x-socorin-anchor`: the clicked button (see
+/// `anchor_header`), where the popover goes. Uploads it to the share
+/// server, puts the link on the clipboard and shows the popover. Resolves
+/// to the link without its delete token (a `PublicLink`, as the history
+/// and the popover get it); a failure comes back as a `ShareError`
+/// (`{ code, message, … }`) for the page's toast.
 #[tauri::command]
-pub async fn upload_png<R: Runtime>(app: AppHandle<R>, request: Request<'_>) -> Result<share::PublicLink, share::ShareError> {
+pub async fn upload_png<R: Runtime>(
+    app: AppHandle<R>,
+    window: tauri::Window<R>,
+    request: Request<'_>,
+) -> Result<share::PublicLink, share::ShareError> {
     let png = raw_body(&request).map_err(|e| share::ShareError::new("invalid_request", e))?;
-    share::share_png(&app, png).await
+    share::share_png(&app, png, anchor_header(&window, &request)).await
 }
 
 /// The remembered links, newest first (without their delete tokens). The
@@ -505,6 +522,13 @@ pub fn share_ready<R: Runtime>(app: AppHandle<R>) {
 #[tauri::command]
 pub fn dismiss_share<R: Runtime>(app: AppHandle<R>) {
     share::dismiss(&app);
+}
+
+/// The user clicked into the popover: a click elsewhere closes it from
+/// now on.
+#[tauri::command]
+pub fn share_engaged<R: Runtime>(app: AppHandle<R>) {
+    share::engaged(&app);
 }
 
 #[tauri::command]
@@ -848,7 +872,12 @@ mod tests {
         share::reset(&handle);
 
         let png = b"\x89PNG\r\n\x1a\n0123456789".to_vec();
-        let res = invoke(&handle, "upload_png", InvokeBody::Raw(png), &[]).unwrap();
+        // The clicked button rides along as a header: the popover goes
+        // right under it (the mock window sits at the origin, scale 1).
+        let anchor = r#"{"x":400,"y":50,"width":80,"height":30}"#;
+        let res = invoke(&handle, "upload_png", InvokeBody::Raw(png), &[("x-socorin-anchor", anchor)]).unwrap();
+        let (w, _) = windows::SHARE_SIZE;
+        assert_eq!(*handle.state::<share::ShareState>().placed.lock().unwrap(), Some((440.0 - w / 2.0, 80.0)));
         let value: serde_json::Value = res.deserialize().unwrap();
         assert_eq!(value["shareUrl"], fake.share_url());
         assert!(value.get("deleteToken").is_none(), "the token must not cross the IPC: {value}");
@@ -875,8 +904,10 @@ mod tests {
         share::reset(&handle);
         let err = invoke(&handle, "upload_png", InvokeBody::Json(json!({})), &[]).unwrap_err();
         assert_eq!(err["code"], "invalid_request");
-        let err = invoke(&handle, "upload_png", InvokeBody::Raw(b"\x89PNG".to_vec()), &[]).unwrap_err();
+        let err = invoke(&handle, "upload_png", InvokeBody::Raw(b"\x89PNG".to_vec()), &[("x-socorin-anchor", "nope")]).unwrap_err();
         assert_eq!(err["code"], "network");
+        // An unreadable anchor is no reason to fail: the popover goes under the icon.
+        assert_eq!(*handle.state::<share::ShareState>().placed.lock().unwrap(), Some((windows::UPDATE_MARGIN, windows::UPDATE_MARGIN)));
         assert!(err["message"].as_str().unwrap().contains("127.0.0.1:9"));
         assert!(matches!(share_notice(handle.clone()), Some(share::Notice::Failed { .. })));
 
@@ -886,7 +917,14 @@ mod tests {
         assert!(copy_share_link(handle.clone(), "nope".into()).is_err());
         share_ready(handle.clone());
         dismiss_share(handle.clone());
-        stop_recording_upload(handle.clone()); // not recording: logged
+        // Not recording: logged. The button's place is kept for the popover
+        // of the stop it would have started, relative to the calling window.
+        let anchor = json!({ "anchor": { "x": 1, "y": 2, "width": 3, "height": 4 } });
+        invoke(&handle, "stop_recording_upload", InvokeBody::Json(anchor), &[]).unwrap();
+        assert_eq!(share::take_anchor(&handle), Some(share::Anchor { x: 1.0, y: 2.0, width: 3.0, height: 4.0 }));
+        invoke(&handle, "stop_recording_upload", InvokeBody::Json(json!({})), &[]).unwrap();
+        assert_eq!(share::take_anchor(&handle), None);
+        invoke(&handle, "share_engaged", InvokeBody::default(), &[]).unwrap();
         std::thread::sleep(std::time::Duration::from_millis(30));
         let res = invoke(&handle, "share_history", InvokeBody::default(), &[]).unwrap();
         assert_eq!(res.deserialize::<Vec<share::PublicLink>>().unwrap(), vec![]);
