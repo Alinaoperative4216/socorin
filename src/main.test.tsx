@@ -2,6 +2,23 @@ import { screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { flush, installTauri, SETTINGS, UPDATE_STATUS, type TauriMock } from "./test/tauri";
 
+// main.tsx renders on import and keeps no handle to its React root, so the
+// trees these tests boot would stay mounted after the test (the recording
+// bar's clock keeps ticking) and React could schedule work once Vitest has
+// torn jsdom down ("window is not defined"). Every root created is recorded
+// here and unmounted after each test.
+const roots = vi.hoisted(() => [] as { unmount(): void }[]);
+vi.mock("react-dom/client", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("react-dom/client")>();
+  const createRoot: typeof actual.createRoot = (...args) => {
+    const root = actual.createRoot(...args);
+    roots.push(root);
+    return root;
+  };
+  const original = actual as typeof actual & { default?: object };
+  return { ...actual, createRoot, default: { ...original.default, createRoot } };
+});
+
 let tauri: TauriMock;
 let root: HTMLElement;
 
@@ -28,7 +45,9 @@ beforeEach(() => {
   document.body.appendChild(root);
 });
 
-afterEach(() => {
+afterEach(async () => {
+  for (const r of roots.splice(0)) r.unmount();
+  await flush(); // let work React already queued run while jsdom still exists
   root.remove();
   window.history.replaceState({}, "", "/");
 });
