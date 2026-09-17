@@ -109,7 +109,7 @@ export const SETTINGS: Settings = {
   annotationColor: "#ff3b30",
   annotationStroke: 3,
   checkUpdates: true,
-  autoUpdate: false,
+  autoUpdate: true,
   updateCheckedAt: 0,
   updateAvailable: "",
   lastVersion: "1.0.2",

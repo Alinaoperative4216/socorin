@@ -56,8 +56,9 @@ pub struct Settings {
     pub annotation_stroke: u8,
     /// Look for a newer version on socorin.com once a day. On by default.
     pub check_updates: bool,
-    /// Install a newer version as soon as the daily check finds one. Off by
-    /// default: the user is only told.
+    /// Install a newer version as soon as the daily check finds one. On by
+    /// default; a settings file that says `false` keeps it off, so a user
+    /// who switched it off stays in charge.
     pub auto_update: bool,
     /// Unix time (seconds) of the last successful update check, 0 = never.
     pub update_checked_at: u64,
@@ -93,7 +94,7 @@ impl Default for Settings {
             annotation_color: DEFAULT_COLOR.into(),
             annotation_stroke: DEFAULT_STROKE,
             check_updates: true,
-            auto_update: false,
+            auto_update: true,
             update_checked_at: 0,
             update_available: String::new(),
             last_version: String::new(),
@@ -438,17 +439,21 @@ mod app_tests {
     }
 
     #[test]
-    fn update_checks_are_on_and_automatic_installs_off_by_default() {
+    fn update_checks_and_automatic_installs_are_on_by_default() {
         let d = Settings::default();
         assert!(d.check_updates);
-        assert!(!d.auto_update);
+        assert!(d.auto_update);
         assert_eq!((d.update_checked_at, d.update_available.as_str(), d.last_version.as_str()), (0, "", ""));
-        // A settings file from before the feature existed: same defaults.
+        // A settings file from before the feature existed, or from before
+        // automatic installs became the default: same defaults.
         let old: Settings = serde_json::from_str(r#"{"hotkey":"F5"}"#).unwrap();
-        assert!(old.check_updates && !old.auto_update);
+        assert!(old.check_updates && old.auto_update);
+        // The user switched automatic installs off: that is kept.
+        let off: Settings = serde_json::from_str(r#"{"autoUpdate":false}"#).unwrap();
+        assert!(off.check_updates && !off.auto_update);
         let json = serde_json::to_value(&d).unwrap();
         assert_eq!(json["checkUpdates"], true);
-        assert_eq!(json["autoUpdate"], false);
+        assert_eq!(json["autoUpdate"], true);
         assert_eq!(json["updateCheckedAt"], 0);
         assert_eq!(json["updateAvailable"], "");
         let chosen: Settings = serde_json::from_str(r#"{"checkUpdates":false,"autoUpdate":true,"updateAvailable":" 1.2.3 "}"#).unwrap();

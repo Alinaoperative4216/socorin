@@ -123,7 +123,7 @@ describe("Settings window", () => {
       cliTriggers: true,
       filePrefix: "Shot",
       checkUpdates: true,
-      autoUpdate: true,
+      autoUpdate: false,
       uploadServer: "https://socorin.com",
     });
     // The style and welcome flags belong to other windows, the update
@@ -342,7 +342,7 @@ describe("Settings window", () => {
     await screen.findByText(/Socorin 1\.0\.2\. Not checked yet\./);
     expect((screen.getByLabelText("Check for updates automatically (once a day)") as HTMLInputElement).checked).toBe(true);
     const auto = screen.getByLabelText("Install updates automatically") as HTMLInputElement;
-    expect(auto.checked).toBe(false);
+    expect(auto.checked).toBe(true);
     expect(auto.disabled).toBe(false);
     // Automatic installs need the daily check.
     fireEvent.click(screen.getByLabelText("Check for updates automatically (once a day)"));

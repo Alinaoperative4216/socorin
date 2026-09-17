@@ -21,7 +21,7 @@ let settings = {
   annotationColor: "#ff3b30",
   annotationStroke: 3,
   checkUpdates: true,
-  autoUpdate: false,
+  autoUpdate: true,
   updateCheckedAt: Math.floor(Date.now() / 1000) - 3600,
   updateAvailable: "1.0.9",
   lastVersion: "1.0.2",

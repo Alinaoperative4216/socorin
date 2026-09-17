@@ -4,9 +4,10 @@
 //! the `version` in it with its own. A newer one is announced in a small
 //! popover under the menu bar / tray icon (`windows::UPDATE`), as an
 //! "Update to …" line at the top of the tray menu and in Settings. With
-//! "Install updates automatically" on it is installed straight away instead
-//! and the popover shows the progress. Installing goes through the updater
-//! plugin: the same manifest names a signed installer per platform (see
+//! "Install updates automatically" on (the default) it is installed straight
+//! away instead and the popover shows the progress. Installing goes through
+//! the updater plugin: the same manifest names a signed installer per
+//! platform (see
 //! `scripts/publish-landing.sh`); when it has none for this platform the
 //! popover offers the download page instead.
 //!
@@ -511,7 +512,8 @@ mod tests {
     #[test]
     fn a_newer_version_is_recorded_and_announced() {
         let dir = temp_dir("update-newer");
-        let app = app_with(settings_in(&dir));
+        // Automatic installs off: the version is announced, not installed.
+        let app = app_with(Settings { auto_update: false, ..settings_in(&dir) });
         let handle = app.handle().clone();
         let base = serve(vec![("/version.json", 200, manifest("0.1.1"))]);
         let before = now_secs();
@@ -573,8 +575,10 @@ mod tests {
     #[test]
     fn automatic_installs_report_their_failure_in_the_popover() {
         let dir = temp_dir("update-auto");
-        let app = app_with(Settings { auto_update: true, ..settings_in(&dir) });
+        // Automatic installs are the default: nothing to switch on.
+        let app = app_with(settings_in(&dir));
         let handle = app.handle().clone();
+        assert!(settings::current(&handle).auto_update, "on by default");
         // The manifest is served twice: by our check and by the plugin's.
         let base = serve(vec![("/pkg", 200, b"not an installer".to_vec())]);
         let base = serve(vec![("/version.json", 200, full_manifest("0.1.1", &format!("{base}/pkg")))]);
@@ -669,7 +673,7 @@ mod tests {
         let base = serve(vec![("/version.json", 200, manifest("0.1.5"))]);
         tick(&handle, &format!("{base}/version.json"));
         assert_eq!(settings::current(&handle).update_available, "");
-        *handle.state::<settings::SettingsState>().0.lock().unwrap() = settings_in(&dir);
+        *handle.state::<settings::SettingsState>().0.lock().unwrap() = Settings { auto_update: false, ..settings_in(&dir) };
         tick(&handle, "http://127.0.0.1:9/version.json"); // fails, logged
         assert_eq!(settings::current(&handle).update_checked_at, 0);
         tick(&handle, &format!("{base}/version.json"));

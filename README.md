@@ -67,10 +67,11 @@ that site for a newer version once a day.
   default; switch it off under *Updates* in Settings). A newer version is
   announced in a small popover under the menu bar / tray icon (Update now /
   Later), as *Update to Socorin x.y.z…* at the top of the tray menu and in
-  Settings, which also has *Check now*. *Install updates automatically* (off
-  by default) downloads and installs it as soon as it is found and restarts
-  the app. Installs go through Tauri's updater: the manifest names a signed
-  installer per platform (macOS `.app.tar.gz`, Windows NSIS `.exe`, Linux
+  Settings, which also has *Check now*. *Install updates automatically* (on
+  by default; switch it off under *Updates*) downloads and installs it as
+  soon as it is found and restarts the app. Installs go through Tauri's
+  updater: the manifest names a signed installer per platform (macOS
+  `.app.tar.gz`, Windows NSIS `.exe`, Linux
   `.AppImage`; `.deb` users are sent to the download page) and the app only
   accepts files whose signature matches the public key built into it.
 - CLI flags for desktop-environment shortcuts: `--capture`, `--capture-full`,
