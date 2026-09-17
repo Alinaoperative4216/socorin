@@ -180,7 +180,8 @@ const handlers: Record<string, Handler> = {
   upload_png: async (args) => {
     console.log("[mock] upload_png", (args as ArrayBuffer).byteLength, "bytes");
     await new Promise((r) => setTimeout(r, 1200));
-    return { ...mockLinks[0], deleteToken: "del-mock" };
+    // No delete token: it never leaves the Rust side (deleting goes by id).
+    return mockLinks[0];
   },
   share_history: async () => mockLinks,
   delete_share: async (args) => {

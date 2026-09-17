@@ -468,7 +468,11 @@ fn upload_recording<R: Runtime>(app: &AppHandle<R>, path: PathBuf) -> (PathBuf, 
     let result = tauri::async_runtime::block_on(async {
         let limits = share::limits(app).await?;
         let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-        share::check(&limits, mime, size, &settings::current(app).upload_server)?;
+        // Held against the limit that applies (the server's, capped by the
+        // client's own) *before* the file is read, so no server can talk the
+        // app into pulling a recording of any size into memory.
+        let host = share::host_of(&settings::current(app).upload_server);
+        share::check(&limits, mime, size, &host)?;
         let bytes = std::fs::read(&path).map_err(|e| share::ShareError::new("io", format!("cannot read {}: {e}", path.display())))?;
         share::upload(app, bytes, share::Kind::Video, mime, name).await
     });
@@ -507,44 +511,95 @@ pub(crate) fn uploadable_video<R: Runtime>(app: &AppHandle<R>, path: PathBuf) ->
 /// `ffmpeg -c copy`: the H.264 stream goes into an MP4 container as it is
 /// (no re-encoding, well under a second for a short clip). The `.mov` is
 /// replaced by the `.mp4`; a name that is taken gets `_2`, `_3`, ….
+///
+/// ffmpeg never writes the final name. It writes into a directory this
+/// function creates for it (0700, and it must not exist yet), and the
+/// result is renamed into a name that was reserved by *creating* the file.
+/// Nothing can therefore slip a symlink (or a file of its own) into the
+/// place ffmpeg is about to write, which a "is this name free?" check
+/// followed by `-y` would have allowed. `-y` is gone with it.
 pub(crate) fn remux_to_mp4(ffmpeg: &Path, source: &Path) -> Result<PathBuf, String> {
-    let target = mp4_sibling(source);
-    let status = Command::new(ffmpeg)
-        .args(["-hide_banner", "-loglevel", "error", "-y", "-i"])
-        .arg(source)
-        .args(["-c", "copy", "-movflags", "+faststart"])
-        .arg(&target)
-        .stdin(Stdio::null())
-        .stdout(quiet())
-        .stderr(quiet())
-        .status()
-        .map_err(|e| format!("cannot start {}: {e}", ffmpeg.display()))?;
-    let written = status.success() && std::fs::metadata(&target).map(|m| m.is_file() && m.len() > 0).unwrap_or(false);
-    if !written {
-        let _ = std::fs::remove_file(&target);
-        return Err(format!("{} could not convert {} to MP4.", ffmpeg.display(), source.display()));
+    let target = reserve_mp4(source)?;
+    let undo = |target: &Path| {
+        let _ = std::fs::remove_file(target);
+    };
+    let work = match scratch_dir(&target) {
+        Ok(dir) => dir,
+        Err(e) => {
+            undo(&target);
+            return Err(e);
+        }
+    };
+    let staged = work.join("remux.mp4");
+    let outcome = (|| -> Result<(), String> {
+        let status = Command::new(ffmpeg)
+            .args(["-hide_banner", "-loglevel", "error", "-i"])
+            .arg(source)
+            .args(["-c", "copy", "-movflags", "+faststart"])
+            .arg(&staged)
+            .stdin(Stdio::null())
+            .stdout(quiet())
+            .stderr(quiet())
+            .status()
+            .map_err(|e| format!("cannot start {}: {e}", ffmpeg.display()))?;
+        let written = status.success() && std::fs::metadata(&staged).map(|m| m.is_file() && m.len() > 0).unwrap_or(false);
+        if !written {
+            return Err(format!("{} could not convert {} to MP4.", ffmpeg.display(), source.display()));
+        }
+        std::fs::rename(&staged, &target).map_err(|e| format!("cannot move the converted file to {}: {e}", target.display()))
+    })();
+    let _ = std::fs::remove_dir_all(&work);
+    if let Err(e) = outcome {
+        undo(&target);
+        return Err(e);
     }
     debug::log(format!("converted {} -> {}", source.display(), target.display()));
     let _ = std::fs::remove_file(source);
     Ok(target)
 }
 
-/// `name.mp4` next to `name.mov`, or `name_2.mp4`… when that exists.
-fn mp4_sibling(source: &Path) -> PathBuf {
+/// `name.mp4` next to `name.mov`, or `name_2.mp4`… — claimed by creating
+/// the (empty) file, so the name cannot be taken between the look and the
+/// write. `create_new` fails on anything that is already there, a symlink
+/// included.
+fn reserve_mp4(source: &Path) -> Result<PathBuf, String> {
     let stem = source
         .file_stem()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| "recording".into());
     let dir = source.parent().unwrap_or(Path::new("."));
-    let mut n = 1;
-    loop {
+    for n in 1..1000 {
         let name = if n == 1 { format!("{stem}.mp4") } else { format!("{stem}_{n}.mp4") };
         let candidate = dir.join(name);
-        if !candidate.exists() {
-            return candidate;
+        match std::fs::OpenOptions::new().write(true).create_new(true).open(&candidate) {
+            Ok(_) => return Ok(candidate),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(format!("cannot create {}: {e}", candidate.display())),
         }
-        n += 1;
     }
+    Err(format!("no free .mp4 name next to {}", source.display()))
+}
+
+/// A directory of our own next to `sibling` (same file system, so the
+/// finished file can be renamed into place), which must not exist yet and
+/// which only the user may enter.
+fn scratch_dir(sibling: &Path) -> Result<PathBuf, String> {
+    let dir = sibling.parent().unwrap_or(Path::new("."));
+    for n in 0..1000 {
+        let candidate = dir.join(format!(".socorin-remux-{}-{n}", std::process::id()));
+        let mut builder = std::fs::DirBuilder::new();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            builder.mode(0o700);
+        }
+        match builder.create(&candidate) {
+            Ok(()) => return Ok(candidate),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(format!("cannot create {}: {e}", candidate.display())),
+        }
+    }
+    Err(format!("cannot make a scratch directory next to {}", sibling.display()))
 }
 
 /// Stop synchronously if a recording runs (used right before quitting, so
@@ -996,8 +1051,10 @@ mod tests {
     fn fake_ffmpeg(dir: &Path, succeed: bool) -> PathBuf {
         use std::os::unix::fs::PermissionsExt;
         let path = dir.join("ffmpeg");
+        // Finds `-i <src>` wherever it sits and copies it to the last
+        // argument, so it does not depend on the exact flag order.
         let body = if succeed {
-            "#!/bin/sh\nsrc=\"$6\"\neval \"dst=\\${$#}\"\ncp \"$src\" \"$dst\"\n"
+            "#!/bin/sh\nsrc=\"\"\nfor a in \"$@\"; do\n  if [ \"$prev\" = \"-i\" ]; then src=\"$a\"; fi\n  prev=\"$a\"\ndone\neval \"dst=\\${$#}\"\ncp \"$src\" \"$dst\"\n"
         } else {
             "#!/bin/sh\nexit 1\n"
         };
@@ -1006,16 +1063,65 @@ mod tests {
         path
     }
 
+    /// The `.mp4` name is claimed by creating the file, so two reservations
+    /// never hand out the same name and an existing file (or a symlink
+    /// planted at that name) is never written through.
     #[test]
-    fn mp4_names_sit_next_to_the_mov_and_never_replace_a_file() {
+    fn mp4_names_are_reserved_next_to_the_mov_and_never_replace_a_file() {
         let dir = temp_dir("record-mp4-name");
         let mov = dir.join("Socorin_2026.mov");
-        assert_eq!(mp4_sibling(&mov), dir.join("Socorin_2026.mp4"));
-        std::fs::write(dir.join("Socorin_2026.mp4"), b"taken").unwrap();
-        assert_eq!(mp4_sibling(&mov), dir.join("Socorin_2026_2.mp4"));
-        std::fs::write(dir.join("Socorin_2026_2.mp4"), b"taken").unwrap();
-        assert_eq!(mp4_sibling(&mov), dir.join("Socorin_2026_3.mp4"));
-        assert!(mp4_sibling(Path::new("bare")).ends_with("bare.mp4"));
+        let first = reserve_mp4(&mov).unwrap();
+        assert_eq!(first, dir.join("Socorin_2026.mp4"));
+        assert!(first.is_file(), "the name is held by the file itself");
+        // A second reservation cannot have the same name, even though
+        // nothing has written to the first one yet.
+        assert_eq!(reserve_mp4(&mov).unwrap(), dir.join("Socorin_2026_2.mp4"));
+        assert_eq!(reserve_mp4(&mov).unwrap(), dir.join("Socorin_2026_3.mp4"));
+        // Something already at the name is stepped over, not overwritten.
+        std::fs::write(dir.join("Socorin_2026_4.mp4"), b"taken").unwrap();
+        assert_eq!(reserve_mp4(&mov).unwrap(), dir.join("Socorin_2026_5.mp4"));
+        assert_eq!(std::fs::read(dir.join("Socorin_2026_4.mp4")).unwrap(), b"taken");
+        // A path whose directory does not exist cannot be reserved.
+        assert!(reserve_mp4(&dir.join("gone").join("clip.mov")).is_err());
+    }
+
+    /// A symlink at the target name is refused outright: `create_new` fails
+    /// on it, so ffmpeg is never pointed at whatever it resolves to.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_at_the_mp4_name_is_never_written_through() {
+        let dir = temp_dir("record-mp4-symlink");
+        let secret = dir.join("secret");
+        std::fs::write(&secret, b"do not touch").unwrap();
+        let mov = dir.join("clip.mov");
+        std::os::unix::fs::symlink(&secret, dir.join("clip.mp4")).unwrap();
+        // The planted name is skipped, the real file is untouched.
+        assert_eq!(reserve_mp4(&mov).unwrap(), dir.join("clip_2.mp4"));
+        assert_eq!(std::fs::read(&secret).unwrap(), b"do not touch");
+
+        std::fs::write(&mov, b"quicktime bytes").unwrap();
+        let ffmpeg = fake_ffmpeg(&dir, true);
+        let mp4 = remux_to_mp4(&ffmpeg, &mov).unwrap();
+        assert_eq!(mp4, dir.join("clip_3.mp4"));
+        assert_eq!(std::fs::read(&secret).unwrap(), b"do not touch", "the symlink target is left alone");
+    }
+
+    /// The scratch directory ffmpeg writes into is the app's own, and only
+    /// the user may enter it.
+    #[test]
+    fn the_remux_scratch_directory_is_private_and_fresh() {
+        let dir = temp_dir("record-scratch");
+        let first = scratch_dir(&dir.join("clip.mp4")).unwrap();
+        assert!(first.is_dir());
+        assert_eq!(first.parent().unwrap(), dir);
+        let second = scratch_dir(&dir.join("clip.mp4")).unwrap();
+        assert_ne!(first, second, "an existing one is never reused");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(std::fs::metadata(&first).unwrap().permissions().mode() & 0o777, 0o700);
+        }
+        assert!(scratch_dir(&dir.join("gone").join("clip.mp4")).is_err());
     }
 
     #[cfg(unix)]
@@ -1085,7 +1191,7 @@ mod tests {
     #[test]
     fn stop_and_upload_sends_the_recording_and_copies_the_link() {
         let dir = temp_dir("record-upload");
-        let fake = share::tests::Fake::new(64, 1_000_000);
+        let fake = share::tests::Fake::new(share::tests::TEST_CHUNK, 1_000_000);
         let base = share::tests::serve_fake(&fake);
         let app = app_with(crate::settings::Settings { upload_server: base, ..settings_in(&dir) });
         share::reset(&app);
@@ -1097,7 +1203,7 @@ mod tests {
         assert!(!is_recording(&app));
         assert!(path.exists(), "the recording stays on disk");
         let Some(share::Notice::Shared { link, .. }) = share::notice(&app) else { panic!("{:?}", share::notice(&app)) };
-        assert_eq!(link.share_url, "https://socorin.com/s/med-0123456789abcdefgh");
+        assert_eq!(link.share_url, fake.share_url());
         assert_eq!(app.state::<share::ShareState>().copied.lock().unwrap().as_slice(), &[link.share_url.clone()]);
         let init = &fake.requests("POST", "/api/upload/init")[0];
         let body: serde_json::Value = serde_json::from_slice(&init.body).unwrap();
@@ -1105,7 +1211,7 @@ mod tests {
         assert_eq!(body["mime"], "video/mp4");
         assert_eq!(body["size"], 200);
         assert_eq!(body["filename"], "clip.mp4");
-        assert_eq!(fake.requests("PUT", "/api/upload/").len(), 4, "200 bytes in chunks of 64");
+        assert_eq!(fake.requests("PUT", "/api/upload/").len(), 1, "200 bytes is one chunk");
         assert_eq!(share::history(&app).len(), 1);
         share::dismiss(&app);
         std::thread::sleep(Duration::from_millis(30));

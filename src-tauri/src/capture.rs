@@ -841,7 +841,7 @@ mod session_tests {
     #[test]
     fn finish_region_uploads_in_upload_mode() {
         let dir = temp_dir("capture-upload");
-        let fake = crate::share::tests::Fake::new(1000, 5_000_000);
+        let fake = crate::share::tests::Fake::new(crate::share::tests::TEST_CHUNK, 5_000_000);
         let base = crate::share::tests::serve_fake(&fake);
         let app = app_with(Settings { after_capture: AfterCapture::Upload, upload_server: base, ..settings_in(&dir) });
         crate::share::reset(app.handle());
@@ -857,7 +857,8 @@ mod session_tests {
         let Some(crate::share::Notice::Shared { link, .. }) = crate::share::notice(&app) else {
             panic!("{:?}", crate::share::notice(&app))
         };
-        assert!(link.share_url.starts_with("https://socorin.com/s/"));
+        // The link is on the server the capture went to (`valid_share_url`).
+        assert_eq!(link.share_url, fake.share_url());
         assert_eq!(link.kind, crate::share::Kind::Image);
         assert!(std::fs::read_dir(&dir).unwrap().next().is_none(), "nothing is saved locally");
         crate::share::dismiss(&app);

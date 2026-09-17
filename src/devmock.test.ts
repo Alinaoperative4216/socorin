@@ -82,7 +82,9 @@ describe("devmock", () => {
     expect(((await internals().invoke("share_notice")) as { kind: string }).kind).toBe("failed");
     const pending = internals().invoke("upload_png", new ArrayBuffer(10));
     await vi.advanceTimersByTimeAsync(1300);
-    expect(((await pending) as { deleteToken: string }).deleteToken).toBe("del-mock");
+    const uploaded = (await pending) as Record<string, unknown>;
+    expect(uploaded.shareUrl).toContain("/s/");
+    expect(uploaded).not.toHaveProperty("deleteToken");
     await internals().invoke("copy_share_link", { id: links[0].id });
     await internals().invoke("stop_recording_upload");
     await internals().invoke("share_ready");

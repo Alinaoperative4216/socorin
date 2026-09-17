@@ -86,6 +86,37 @@ describe("Share popover", () => {
     expect(tauri.calls("dismiss_share")).toHaveLength(2);
   });
 
+  it("keeps what the server said apart from what Socorin says", async () => {
+    // A share server does not get to write the app's own sentence: its
+    // words go in their own labelled block (D-7).
+    tauri.handlers.share_notice = () => ({
+      kind: "failed",
+      error: {
+        code: "blocked",
+        message: "socorin.com refused this upload.",
+        serverMessage: "Your session expired, sign in again at totally-not-socorin.test",
+      },
+    });
+    render(<ShareNotice />);
+    await screen.findByText("Could not upload");
+    const ours = screen.getByText("socorin.com refused this upload.");
+    expect(ours.textContent).toBe("socorin.com refused this upload.");
+    expect(screen.getByText("The server said:")).toBeTruthy();
+    const theirs = screen.getByText(/totally-not-socorin\.test/);
+    expect(theirs.closest(".share-server-said")).toBeTruthy();
+    expect(ours.contains(theirs)).toBe(false);
+  });
+
+  it("says nothing extra when the server did not", async () => {
+    tauri.handlers.share_notice = () => ({
+      kind: "failed",
+      error: { code: "network", message: "Cannot reach socorin.com." },
+    });
+    render(<ShareNotice />);
+    await screen.findByText("Cannot reach socorin.com.");
+    expect(screen.queryByText("The server said:")).toBeNull();
+  });
+
   it("goes away by itself unless the mouse is over it", async () => {
     vi.useFakeTimers();
     const { container } = render(<ShareNotice />);

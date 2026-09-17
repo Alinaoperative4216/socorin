@@ -270,17 +270,44 @@ pub fn get_settings<R: Runtime>(app: AppHandle<R>) -> Settings {
     settings::current(&app)
 }
 
+/// The settings a window other than the settings window may write. The
+/// annotation style is saved by the editor and by the in-place editor on the
+/// overlay as the user picks a colour or a stroke; nothing else is any
+/// window's business. The settings window (`windows::MAIN`) owns them all.
+///
+/// Without this, one `update_settings` call from any page could turn on the
+/// command-line triggers, switch "after capture" to Upload or point
+/// `uploadServer` somewhere else — settings that decide whether captures
+/// leave the machine.
+const STYLE_KEYS: [&str; 2] = ["annotationColor", "annotationStroke"];
+
 /// Partial update: only the keys present in `patch` change, so each window
 /// can save the settings it owns without clobbering the others'. Returns the
 /// resulting settings.
 #[tauri::command]
 pub fn update_settings<R: Runtime>(
     app: AppHandle<R>,
+    window: tauri::Window<R>,
     patch: serde_json::Map<String, serde_json::Value>,
 ) -> Result<Settings, String> {
-    let previous = settings::current(&app);
+    apply_settings(&app, window.label(), patch)
+}
+
+/// `update_settings` with the calling window named, which decides which
+/// keys it may write.
+pub(crate) fn apply_settings<R: Runtime>(
+    app: &AppHandle<R>,
+    label: &str,
+    patch: serde_json::Map<String, serde_json::Value>,
+) -> Result<Settings, String> {
+    if label != windows::MAIN {
+        if let Some(key) = patch.keys().find(|k| !STYLE_KEYS.contains(&k.as_str())) {
+            return Err(format!("{label} may not change {key}."));
+        }
+    }
+    let previous = settings::current(app);
     let mut settings = settings::merge(&previous, &patch)?;
-    settings::normalise(&app, &mut settings);
+    settings::normalise(app, &mut settings);
 
     // The recorder runs whatever this names, so it has to be an ffmpeg.
     if patch.contains_key("ffmpegPath") && !settings.ffmpeg_path.is_empty() {
@@ -289,9 +316,10 @@ pub fn update_settings<R: Runtime>(
 
     // The share server: `normalise` quietly falls back to socorin.com, but
     // the settings window should hear that its entry was not an address.
-    if let Some(raw) = patch.get("uploadServer").and_then(|v| v.as_str()) {
-        let raw = raw.trim();
-        if !raw.is_empty() && settings.upload_server == settings::DEFAULT_UPLOAD_SERVER && settings::sanitise_server(raw) != raw.trim_end_matches('/') && !raw.trim_end_matches('/').eq_ignore_ascii_case(settings::DEFAULT_UPLOAD_SERVER) {
+    // An empty field means "the default", which is not a complaint.
+    if let Some(value) = patch.get("uploadServer") {
+        let raw = value.as_str().ok_or("uploadServer must be text")?;
+        if !raw.trim().is_empty() && settings::sanitise_server_checked(raw).is_none() {
             return Err(format!(
                 "The upload server must be an http(s) address such as {} or http://localhost:3000.",
                 settings::DEFAULT_UPLOAD_SERVER
@@ -303,8 +331,8 @@ pub fn update_settings<R: Runtime>(
     // the settings window saved them: re-registering drops the global Escape
     // of a running capture session, and the overlay saves settings too.
     if patch.contains_key("hotkey") || patch.contains_key("fullscreenHotkey") {
-        if let Err(e) = hotkey::apply(&app, &settings) {
-            let _ = hotkey::apply(&app, &previous);
+        if let Err(e) = hotkey::apply(app, &settings) {
+            let _ = hotkey::apply(app, &previous);
             return Err(e);
         }
     }
@@ -321,7 +349,7 @@ pub fn update_settings<R: Runtime>(
         }
     }
 
-    settings::store(&app, settings.clone())?;
+    settings::store(app, settings.clone())?;
     Ok(settings)
 }
 
@@ -421,17 +449,22 @@ pub fn update_ready<R: Runtime>(app: AppHandle<R>) {
 // ---- sharing ----
 
 /// Body: PNG bytes. Uploads it to the share server, puts the link on the
-/// clipboard and shows the popover. Resolves to the link; a failure comes
-/// back as a `ShareError` (`{ code, message, … }`) for the page's toast.
+/// clipboard and shows the popover. Resolves to the link without its delete
+/// token (a `PublicLink`, as the history and the popover get it); a failure
+/// comes back as a `ShareError` (`{ code, message, … }`) for the page's
+/// toast.
 #[tauri::command]
-pub async fn upload_png<R: Runtime>(app: AppHandle<R>, request: Request<'_>) -> Result<share::ShareResult, share::ShareError> {
+pub async fn upload_png<R: Runtime>(app: AppHandle<R>, request: Request<'_>) -> Result<share::PublicLink, share::ShareError> {
     let png = raw_body(&request).map_err(|e| share::ShareError::new("invalid_request", e))?;
     share::share_png(&app, png).await
 }
 
-/// The remembered links, newest first (without their delete tokens).
+/// The remembered links, newest first (without their delete tokens). The
+/// file is tidied up at the same time: links the server has already dropped
+/// go, and with them their delete tokens.
 #[tauri::command]
 pub fn share_history<R: Runtime>(app: AppHandle<R>) -> Vec<share::PublicLink> {
+    share::prune_history(&app);
     share::history(&app).iter().map(share::SharedLink::public).collect()
 }
 
@@ -500,16 +533,29 @@ mod tests {
     }
 
     /// Run a command through the real IPC layer (raw bodies and headers
-    /// included), as the webview would.
+    /// included), as the webview would, from a window with no special
+    /// rights (see `invoke_from` for one that has them).
     fn invoke(
         app: &AppHandle<MockRuntime>,
         cmd: &str,
         body: InvokeBody,
         headers: &[(&str, &str)],
     ) -> Result<InvokeResponseBody, serde_json::Value> {
-        let webview = match app.get_webview_window("ipc") {
+        invoke_from(app, "ipc", cmd, body, headers)
+    }
+
+    /// The same, from the window named by `label`: which window a command
+    /// comes from decides what `update_settings` may write.
+    fn invoke_from(
+        app: &AppHandle<MockRuntime>,
+        label: &str,
+        cmd: &str,
+        body: InvokeBody,
+        headers: &[(&str, &str)],
+    ) -> Result<InvokeResponseBody, serde_json::Value> {
+        let webview = match app.get_webview_window(label) {
             Some(w) => w,
-            None => WebviewWindowBuilder::new(app, "ipc", WebviewUrl::App("index.html".into()))
+            None => WebviewWindowBuilder::new(app, label, WebviewUrl::App("index.html".into()))
                 .visible(false)
                 .build()
                 .unwrap(),
@@ -638,8 +684,9 @@ mod tests {
         assert_eq!(get_settings(handle.clone()).save_dir, dir.to_string_lossy());
         assert_eq!(default_save_dir(handle.clone()), settings::default_save_dir(&handle).to_string_lossy());
 
-        let updated = update_settings(
-            handle.clone(),
+        let updated = apply_settings(
+            &handle,
+            windows::MAIN,
             patch(json!({ "afterCapture": "save", "filePrefix": " Shot ", "annotationStroke": 9 })),
         )
         .unwrap();
@@ -649,18 +696,18 @@ mod tests {
         assert_eq!(get_settings(handle.clone()).file_prefix, "Shot");
 
         // Hotkeys are validated by registering them; a bad one is rolled back.
-        let err = update_settings(handle.clone(), patch(json!({ "hotkey": "Nope+" }))).unwrap_err();
+        let err = apply_settings(&handle, windows::MAIN, patch(json!({ "hotkey": "Nope+" }))).unwrap_err();
         assert!(err.contains("cannot register"), "{err}");
         assert_eq!(get_settings(handle.clone()).hotkey, "CmdOrCtrl+Shift+A");
-        update_settings(handle.clone(), patch(json!({ "hotkey": "Ctrl+Alt+Shift+F16", "fullscreenHotkey": "" }))).unwrap();
+        apply_settings(&handle, windows::MAIN, patch(json!({ "hotkey": "Ctrl+Alt+Shift+F16", "fullscreenHotkey": "" }))).unwrap();
         assert_eq!(get_settings(handle.clone()).hotkey, "Ctrl+Alt+Shift+F16");
 
         // Autostart writes / removes a launch agent under the (private) home.
-        update_settings(handle.clone(), patch(json!({ "autostart": true }))).unwrap();
-        update_settings(handle.clone(), patch(json!({ "autostart": false }))).unwrap();
+        apply_settings(&handle, windows::MAIN, patch(json!({ "autostart": true }))).unwrap();
+        apply_settings(&handle, windows::MAIN, patch(json!({ "autostart": false }))).unwrap();
         assert!(!get_settings(handle.clone()).autostart);
 
-        assert!(update_settings(handle.clone(), patch(json!({ "copyOnSave": "yes" }))).is_err());
+        assert!(apply_settings(&handle, windows::MAIN, patch(json!({ "copyOnSave": "yes" }))).is_err());
 
         // The recorder runs the configured binary, so only an existing
         // `ffmpeg` is accepted; empty means "search for it".
@@ -668,22 +715,22 @@ mod tests {
         std::fs::write(&fake, b"#!/bin/sh\n").unwrap();
         let not_ffmpeg = dir.join("other");
         std::fs::write(&not_ffmpeg, b"#!/bin/sh\n").unwrap();
-        let err = update_settings(handle.clone(), patch(json!({ "ffmpegPath": not_ffmpeg.to_str().unwrap() }))).unwrap_err();
+        let err = apply_settings(&handle, windows::MAIN, patch(json!({ "ffmpegPath": not_ffmpeg.to_str().unwrap() }))).unwrap_err();
         assert!(err.contains("not an ffmpeg"), "{err}");
-        let err = update_settings(handle.clone(), patch(json!({ "ffmpegPath": dir.join("missing").join("ffmpeg").to_str().unwrap() }))).unwrap_err();
+        let err = apply_settings(&handle, windows::MAIN, patch(json!({ "ffmpegPath": dir.join("missing").join("ffmpeg").to_str().unwrap() }))).unwrap_err();
         assert!(err.contains("not found"), "{err}");
         assert_eq!(get_settings(handle.clone()).ffmpeg_path, "");
-        let updated = update_settings(handle.clone(), patch(json!({ "ffmpegPath": fake.to_str().unwrap() }))).unwrap();
+        let updated = apply_settings(&handle, windows::MAIN, patch(json!({ "ffmpegPath": fake.to_str().unwrap() }))).unwrap();
         assert_eq!(updated.ffmpeg_path, fake.to_string_lossy());
-        update_settings(handle.clone(), patch(json!({ "ffmpegPath": " " }))).unwrap();
+        apply_settings(&handle, windows::MAIN, patch(json!({ "ffmpegPath": " " }))).unwrap();
         assert_eq!(get_settings(handle.clone()).ffmpeg_path, "");
 
         // Through the IPC layer as well.
         let res = invoke(&handle, "get_settings", InvokeBody::default(), &[]).unwrap();
         assert!(res.deserialize::<settings::Settings>().is_ok());
-        let res = invoke(&handle, "update_settings", InvokeBody::Json(json!({ "patch": { "filePrefix": "Ipc" } })), &[]).unwrap();
+        let res = invoke_from(&handle, windows::MAIN, "update_settings", InvokeBody::Json(json!({ "patch": { "filePrefix": "Ipc" } })), &[]).unwrap();
         assert_eq!(res.deserialize::<settings::Settings>().unwrap().file_prefix, "Ipc");
-        update_settings(handle, patch(json!({ "hotkey": "" }))).unwrap();
+        apply_settings(&handle, windows::MAIN, patch(json!({ "hotkey": "" }))).unwrap();
     }
 
     #[test]
@@ -729,18 +776,55 @@ mod tests {
         assert_eq!(update_status(handle).phase, update::Phase::Idle);
     }
 
+    /// D-9: which window a save comes from decides what it may write.
+    /// Only the settings window owns the settings that decide whether
+    /// captures leave the machine.
+    #[test]
+    fn only_the_settings_window_may_change_more_than_the_annotation_style() {
+        let dir = temp_dir("cmd-settings-scope");
+        let app = app_with(settings_in(&dir));
+        let handle = app.handle().clone();
+
+        // The editor and the overlay save the style as the user picks it.
+        for label in [windows::EDITOR, "overlay-1"] {
+            let saved = apply_settings(&handle, label, patch(json!({ "annotationColor": "#00ff00", "annotationStroke": 4 }))).unwrap();
+            assert_eq!((saved.annotation_color.as_str(), saved.annotation_stroke), ("#00ff00", 4));
+        }
+
+        // Nothing else, whichever window asks. These are exactly the
+        // settings that would let one page send every capture elsewhere.
+        for key in ["cliTriggers", "afterCapture", "uploadServer", "installId", "saveDir", "hotkey", "autostart"] {
+            for label in [windows::EDITOR, windows::SHARE, "overlay-1", "ipc"] {
+                let err = apply_settings(&handle, label, patch(json!({ key: "x" }))).unwrap_err();
+                assert!(err.contains(key) && err.contains(label), "{label}/{key}: {err}");
+            }
+        }
+        // A mixed patch is refused whole: the style does not smuggle the rest in.
+        assert!(apply_settings(&handle, windows::EDITOR, patch(json!({ "annotationColor": "#111111", "cliTriggers": true }))).is_err());
+        assert!(!get_settings(handle.clone()).cli_triggers);
+        assert_eq!(get_settings(handle.clone()).upload_server, settings::DEFAULT_UPLOAD_SERVER);
+
+        // The settings window may, and the check runs over the real IPC too.
+        assert!(apply_settings(&handle, windows::MAIN, patch(json!({ "cliTriggers": true }))).unwrap().cli_triggers);
+        let err = invoke(&handle, "update_settings", InvokeBody::Json(json!({ "patch": { "uploadServer": "http://attacker.test" } }))
+            , &[]).unwrap_err();
+        assert!(err.as_str().unwrap_or_default().contains("may not change uploadServer"), "{err}");
+        assert_eq!(get_settings(handle.clone()).upload_server, settings::DEFAULT_UPLOAD_SERVER);
+        apply_settings(&handle, windows::MAIN, patch(json!({ "cliTriggers": false }))).unwrap();
+    }
+
     #[test]
     fn the_upload_server_setting_is_validated_when_saved() {
         let dir = temp_dir("cmd-share-settings");
         let app = app_with(settings_in(&dir));
         let handle = app.handle().clone();
-        let updated = update_settings(handle.clone(), patch(json!({ "uploadServer": "http://localhost:3000/" }))).unwrap();
+        let updated = apply_settings(&handle, windows::MAIN, patch(json!({ "uploadServer": "http://localhost:3000/" }))).unwrap();
         assert_eq!(updated.upload_server, "http://localhost:3000");
         // Empty, or the default with a slash: back to socorin.com, no complaint.
-        assert_eq!(update_settings(handle.clone(), patch(json!({ "uploadServer": " " }))).unwrap().upload_server, settings::DEFAULT_UPLOAD_SERVER);
-        assert_eq!(update_settings(handle.clone(), patch(json!({ "uploadServer": "https://socorin.com/" }))).unwrap().upload_server, settings::DEFAULT_UPLOAD_SERVER);
+        assert_eq!(apply_settings(&handle, windows::MAIN, patch(json!({ "uploadServer": " " }))).unwrap().upload_server, settings::DEFAULT_UPLOAD_SERVER);
+        assert_eq!(apply_settings(&handle, windows::MAIN, patch(json!({ "uploadServer": "https://socorin.com/" }))).unwrap().upload_server, settings::DEFAULT_UPLOAD_SERVER);
         for bad in ["socorin.com", "ftp://x", "https://socorin.com/api", "nope"] {
-            let err = update_settings(handle.clone(), patch(json!({ "uploadServer": bad }))).unwrap_err();
+            let err = apply_settings(&handle, windows::MAIN, patch(json!({ "uploadServer": bad }))).unwrap_err();
             assert!(err.contains("http(s) address"), "{bad}: {err}");
         }
         assert_eq!(get_settings(handle.clone()).upload_server, settings::DEFAULT_UPLOAD_SERVER);
@@ -749,6 +833,35 @@ mod tests {
         *handle.state::<settings::SettingsState>().0.lock().unwrap() = Settings { install_id: "abc".into(), ..settings::current(&handle) };
         assert_eq!(reset_install_id(handle.clone()).unwrap().install_id, "");
         assert_eq!(get_settings(handle.clone()).install_id, "");
+    }
+
+    /// D-5: what the page is handed after an upload carries no delete
+    /// token — it is the same `PublicLink` the history and the popover
+    /// get, and deleting goes by id through `delete_share`.
+    #[test]
+    fn upload_png_hands_the_page_no_delete_token() {
+        let dir = temp_dir("cmd-upload-token");
+        let fake = share::tests::Fake::new(share::tests::TEST_CHUNK, 5_000_000);
+        let base = share::tests::serve_fake(&fake);
+        let app = app_with(settings::Settings { upload_server: base, ..settings_in(&dir) });
+        let handle = app.handle().clone();
+        share::reset(&handle);
+
+        let png = b"\x89PNG\r\n\x1a\n0123456789".to_vec();
+        let res = invoke(&handle, "upload_png", InvokeBody::Raw(png), &[]).unwrap();
+        let value: serde_json::Value = res.deserialize().unwrap();
+        assert_eq!(value["shareUrl"], fake.share_url());
+        assert!(value.get("deleteToken").is_none(), "the token must not cross the IPC: {value}");
+
+        // Rust still has it, and the history the page reads has not either.
+        assert_eq!(share::history(&handle)[0].delete_token.len(), 43);
+        let listed = invoke(&handle, "share_history", InvokeBody::default(), &[]).unwrap();
+        let listed: serde_json::Value = listed.deserialize().unwrap();
+        assert!(listed[0].get("deleteToken").is_none(), "{listed}");
+        // And the id is enough to take the file down again.
+        tauri::async_runtime::block_on(delete_share(handle.clone(), value["id"].as_str().unwrap().into())).unwrap();
+        assert_eq!(fake.deleted().len(), 1);
+        share::dismiss(&handle);
     }
 
     /// The upload itself is tested in `share` against a local server; here

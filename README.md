@@ -37,9 +37,13 @@ that site for a newer version once a day.
   toolbar sends the picture, annotations included, to socorin.com and puts a
   share link on the clipboard, announced in a small popover under the menu
   bar / tray icon (Copy again / Delete from server). Files are kept for 60
-  days and may be 5 MB at most. *Settings → Share* lists the links you made,
-  with *Copy* and *Delete* for each, and takes another upload server (a
-  self-hosted one, or `http://localhost:3000` while developing).
+  days and may be 5 MB at most on socorin.com; Socorin itself never uploads
+  more than 25 MB, whatever a server allows. The link it copies always has
+  to be one on the server the capture went to — an answer pointing anywhere
+  else is refused and nothing reaches the clipboard. *Settings → Share*
+  lists the links you made, with *Copy* and *Delete* for each (links whose
+  time is up drop off the list by themselves), and takes another upload
+  server (a self-hosted one, or `http://localhost:3000` while developing).
 - "After capture" modes: annotate on screen, copy immediately, save
   immediately, upload and copy the link immediately.
 - Screen recording of a region or the full screen (tray menu, hotkey, CLI).

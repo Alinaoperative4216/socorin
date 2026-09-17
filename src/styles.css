@@ -393,6 +393,23 @@ html[data-window="share"] body {
   -webkit-user-select: text;
 }
 
+/* What the share server said for itself, kept visibly apart from the app's
+   own sentence above it (and cut to two lines, however much it sent). */
+.share-server-said {
+  font-size: 11px;
+  color: var(--muted);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.share-server-said span {
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-size: 10px;
+}
+
 .share-notice .row button {
   white-space: nowrap;
   padding-left: 12px;

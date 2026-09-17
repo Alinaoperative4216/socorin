@@ -106,19 +106,11 @@ export interface Settings {
 
 export type ShareKind = "image" | "video";
 
-/** The answer to a finished upload (`upload_png`). */
-export interface ShareResult {
-  id: string;
-  shareUrl: string;
-  deleteToken: string;
-  /** ISO 8601, when the server removes the file. */
-  expiresAt: string;
-  kind: ShareKind;
-  mime: string;
-  size: number;
-}
-
-/** A remembered link (`share_history`), without its delete token. */
+/**
+ * A link, as every command and event hands it over: no delete token, which
+ * stays on the Rust side (deleting goes by `id`, `deleteShare`). This is
+ * what `upload_png` resolves to and what `share_history` lists.
+ */
 export interface SharedLink {
   id: string;
   shareUrl: string;
@@ -137,7 +129,10 @@ export interface SharedLink {
  */
 export interface ShareError {
   code: string;
+  /** Socorin's own sentence; never contains anything the server wrote. */
   message: string;
+  /** What the server said for itself, cleaned and cut. Shown apart. */
+  serverMessage?: string;
   maxBytes?: number;
   retryAfterSeconds?: number;
 }
@@ -262,7 +257,7 @@ export const ipc = {
    * Uploads PNG bytes to the share server, puts the link on the clipboard
    * and shows the popover. Rejects with a `ShareError`.
    */
-  uploadPng: (png: Uint8Array) => invoke<ShareResult>("upload_png", png),
+  uploadPng: (png: Uint8Array) => invoke<SharedLink>("upload_png", png),
   /** The remembered links, newest first. */
   shareHistory: () => invoke<SharedLink[]>("share_history"),
   /** "Delete from server" for a remembered link. Rejects with a `ShareError`. */

@@ -115,12 +115,11 @@ const MAX_PREFIX_LEN: usize = 64;
 
 /// The share server as an origin: `http://` or `https://` with a host, an
 /// optional port and no path, query or trailing slash (the API paths are
-/// appended to it). Anything else, and an empty field, means socorin.com.
-pub fn sanitise_server(raw: &str) -> String {
+/// appended to it). `None` when the text is not such an address, so the
+/// settings window can say so instead of silently saving something else.
+pub fn sanitise_server_checked(raw: &str) -> Option<String> {
     let trimmed = raw.trim().trim_end_matches('/');
-    let Ok(url) = url::Url::parse(trimmed) else {
-        return DEFAULT_UPLOAD_SERVER.into();
-    };
+    let url = url::Url::parse(trimmed).ok()?;
     let plain = matches!(url.scheme(), "http" | "https")
         && url.host_str().map_or(false, |h| !h.is_empty())
         && url.username().is_empty()
@@ -129,7 +128,7 @@ pub fn sanitise_server(raw: &str) -> String {
         && url.fragment().is_none()
         && matches!(url.path(), "" | "/");
     if !plain {
-        return DEFAULT_UPLOAD_SERVER.into();
+        return None;
     }
     // `Url` lower-cases the scheme and host; the port stays when it is not
     // the scheme's default.
@@ -137,7 +136,13 @@ pub fn sanitise_server(raw: &str) -> String {
     if let Some(port) = url.port() {
         origin.push_str(&format!(":{port}"));
     }
-    origin
+    Some(origin)
+}
+
+/// The share server, falling back to socorin.com for anything that is not
+/// an origin (an empty field, a settings file edited by hand).
+pub fn sanitise_server(raw: &str) -> String {
+    sanitise_server_checked(raw).unwrap_or_else(|| DEFAULT_UPLOAD_SERVER.into())
 }
 
 /// The install id is opaque to the app; only obviously broken values (spaces,
@@ -236,19 +241,44 @@ pub fn save<R: Runtime>(app: &AppHandle<R>, settings: &Settings) -> Result<(), S
     write_atomically(&path, json.as_bytes())
 }
 
+/// Writes the file only the user can read: `settings.json` names the save
+/// folder and `shares.json` holds the delete token of every shared link,
+/// so neither belongs in a world-readable file.
 pub(crate) fn write_atomically(path: &std::path::Path, bytes: &[u8]) -> Result<(), String> {
     let dir = path.parent().ok_or("settings path has no directory")?;
     fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     let mut tmp = path.as_os_str().to_owned();
     tmp.push(&format!(".{}.tmp", std::process::id()));
     let tmp = PathBuf::from(tmp);
-    let written = fs::write(&tmp, bytes)
+    let written = write_private(&tmp, bytes)
         .and_then(|()| fs::rename(&tmp, path))
         .map_err(|e| format!("cannot write {}: {e}", path.display()));
     if written.is_err() {
         let _ = fs::remove_file(&tmp);
     }
     written
+}
+
+/// `fs::write`, but the file is created with mode 0600 on unix rather than
+/// whatever the umask allows.
+fn write_private(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(path)?;
+    file.write_all(bytes)?;
+    // A file that already existed keeps its old mode, so set it as well.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = file.set_permissions(fs::Permissions::from_mode(0o600));
+    }
+    file.flush()
 }
 
 /// Snapshot of the current settings.
@@ -320,6 +350,19 @@ mod sanitise_tests {
     #[test]
     fn is_bounded() {
         assert_eq!(sanitise_prefix(&"x".repeat(500)).len(), 64);
+    }
+
+    /// The checked form says *no* instead of quietly handing back the
+    /// default, so the settings window can report a typo (and so
+    /// `commands::apply_settings` need not guess from the outcome).
+    #[test]
+    fn a_server_that_is_not_an_origin_is_rejected_rather_than_replaced() {
+        use super::{sanitise_server_checked, DEFAULT_UPLOAD_SERVER};
+        assert_eq!(sanitise_server_checked("https://socorin.com").as_deref(), Some(DEFAULT_UPLOAD_SERVER));
+        assert_eq!(sanitise_server_checked(" HTTP://Localhost:3000/ ").as_deref(), Some("http://localhost:3000"));
+        for bad in ["", "   ", "socorin.com", "ftp://x", "https://socorin.com/api", "https://user:pw@socorin.com", "nope"] {
+            assert_eq!(sanitise_server_checked(bad), None, "{bad:?}");
+        }
     }
 
     #[test]
@@ -414,6 +457,29 @@ mod app_tests {
         let mut s = chosen;
         normalise(app.handle(), &mut s);
         assert_eq!(s.update_available, "1.2.3");
+    }
+
+    /// `settings.json` and `shares.json` (which holds a delete token per
+    /// shared link) are the user's alone.
+    #[cfg(unix)]
+    #[test]
+    fn what_is_written_is_readable_by_the_user_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = crate::test_support::temp_dir("settings-mode");
+        let path = dir.join("shares.json");
+        // A file that already exists with wider rights is narrowed as well.
+        std::fs::write(&path, b"old").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        super::write_atomically(&path, b"[]").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "[]");
+        assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+
+        let fresh = dir.join("deeper").join("settings.json");
+        super::write_atomically(&fresh, b"{}").unwrap();
+        assert_eq!(std::fs::metadata(&fresh).unwrap().permissions().mode() & 0o777, 0o600);
+        // No temporary file is left behind.
+        assert_eq!(std::fs::read_dir(dir.join("deeper")).unwrap().count(), 1);
+        assert!(super::write_atomically(std::path::Path::new("/"), b"x").is_err());
     }
 
     #[test]

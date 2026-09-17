@@ -91,6 +91,13 @@ export function ShareNotice() {
       <>
         <h1>Could not upload</h1>
         <p>{notice.error.message}</p>
+        {notice.error.serverMessage && (
+          // The server's own words, kept apart from Socorin's: a share
+          // server does not get to write the app's messages for it.
+          <p className="share-server-said">
+            <span>The server said:</span> <q>{notice.error.serverMessage}</q>
+          </p>
+        )}
         <div className="row">
           <button type="button" onClick={dismiss}>
             Close
