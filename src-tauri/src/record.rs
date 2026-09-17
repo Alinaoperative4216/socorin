@@ -243,7 +243,14 @@ fn start_inner<R: Runtime>(app: &AppHandle<R>, area: Area, bar: Option<Bar>) -> 
     }
 
     let path = output_path(app)?;
-    let child = spawn_backend(app, &area, &path)?;
+    let child = match spawn_backend(app, &area, &path) {
+        Ok(child) => child,
+        Err(e) => {
+            // The name may have been reserved with an empty file.
+            let _ = std::fs::remove_file(&path);
+            return Err(e);
+        }
+    };
     let started_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
@@ -339,7 +346,13 @@ pub fn stop_with<R: Runtime>(app: &AppHandle<R>, outcome: Outcome) -> Result<Opt
         let _ = app.emit("recording:stopped", Stopped { copied: false });
         return Ok(None);
     }
-    let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+    // Only a regular file at that name counts (a symlink planted there is
+    // not revealed or copied; `symlink_metadata` does not follow it).
+    let size = std::fs::symlink_metadata(&path)
+        .ok()
+        .filter(|m| m.is_file())
+        .map(|m| m.len())
+        .unwrap_or(0);
     if size == 0 {
         let _ = std::fs::remove_file(&path);
         windows::hide_recorder(app);
@@ -384,10 +397,43 @@ pub fn stop_if_recording<R: Runtime>(app: &AppHandle<R>) {
     }
 }
 
+/// Where the encoder writes. ffmpeg (`-y`) overwrites, so the name is
+/// reserved with an empty file first and nothing else can take it in
+/// between. macOS `screencapture` refuses an existing path — a symlink
+/// included, so there a planted name only makes the recording fail — and
+/// gets a name that is merely free.
 fn output_path<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf, String> {
     let settings = settings::current(app);
-    let ext = if cfg!(target_os = "macos") { "mov" } else { "mp4" };
-    capture::free_path(&settings::save_dir(app), &settings.file_prefix, ext)
+    let dir = settings::save_dir(app);
+    if cfg!(target_os = "macos") {
+        capture::free_path(&dir, &settings.file_prefix, "mov")
+    } else {
+        capture::reserve_path(&dir, &settings.file_prefix, "mp4")
+    }
+}
+
+/// The ffmpeg the user entered under Settings → Recording. The recorder
+/// runs whatever this names, so it has to be an absolute path to an
+/// existing file called `ffmpeg` (or `ffmpeg.exe`): the setting cannot
+/// point the recorder at some other program.
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+pub(crate) fn configured_ffmpeg(configured: &str) -> Result<PathBuf, String> {
+    let path = PathBuf::from(configured);
+    let stem_is_ffmpeg = path
+        .file_stem()
+        .map(|s| s.eq_ignore_ascii_case("ffmpeg"))
+        .unwrap_or(false);
+    let ext_is_exe_or_none = path.extension().map_or(true, |e| e.eq_ignore_ascii_case("exe"));
+    if !(stem_is_ffmpeg && ext_is_exe_or_none) {
+        return Err(format!(
+            "{configured} is not an ffmpeg binary: Settings → Recording expects the path of ffmpeg itself (…/ffmpeg or …\\ffmpeg.exe)."
+        ));
+    }
+    if path.is_absolute() && path.is_file() {
+        Ok(path)
+    } else {
+        Err(format!("ffmpeg not found at {configured} (Settings → Recording); leave the field empty to search for it."))
+    }
 }
 
 fn quiet() -> Stdio {
@@ -421,12 +467,7 @@ fn spawn_backend<R: Runtime>(_app: &AppHandle<R>, area: &Area, path: &Path) -> R
 fn ffmpeg_binary<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf, String> {
     let configured = settings::current(app).ffmpeg_path;
     if !configured.is_empty() {
-        let path = PathBuf::from(&configured);
-        return if path.is_absolute() && path.is_file() {
-            Ok(path)
-        } else {
-            Err(format!("ffmpeg not found at {configured} (Settings → Recording); leave the field empty to search for it."))
-        };
+        return configured_ffmpeg(&configured);
     }
     let exe = if cfg!(windows) { "ffmpeg.exe" } else { "ffmpeg" };
     let mut candidates: Vec<PathBuf> = Vec::new();
@@ -709,6 +750,51 @@ mod tests {
         let name = path.file_name().unwrap().to_string_lossy().into_owned();
         assert!(name.starts_with("Socorin_"));
         assert!(name.ends_with(if cfg!(target_os = "macos") { ".mov" } else { ".mp4" }));
+        // ffmpeg overwrites, so its name is reserved up front; screencapture
+        // would refuse an existing file, so on macOS the name is only free.
+        assert_eq!(path.exists(), !cfg!(target_os = "macos"));
         let _ = quiet();
+    }
+
+    /// A symlink planted under the recording's name is neither revealed nor
+    /// copied: only a regular file counts as a recording.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_at_the_output_path_is_not_a_recording() {
+        let dir = temp_dir("record-symlink");
+        let app = app_with(settings_in(&dir));
+        let target = dir.join("elsewhere.mov");
+        std::fs::write(&target, b"not ours").unwrap();
+        let link = dir.join("planted.mov");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        recording(&app, link.clone());
+        let err = stop_with(&app, Outcome::Copy).unwrap_err();
+        assert!(err.contains("no video was written"), "{err}");
+        assert!(std::fs::symlink_metadata(&link).is_err(), "the link is removed");
+        assert_eq!(std::fs::read(&target).unwrap(), b"not ours");
+    }
+
+    #[test]
+    fn the_configured_ffmpeg_must_be_an_existing_ffmpeg() {
+        let dir = temp_dir("record-ffmpeg");
+        let real = dir.join("ffmpeg");
+        std::fs::write(&real, b"").unwrap();
+        assert_eq!(configured_ffmpeg(real.to_str().unwrap()).unwrap(), real);
+        let exe = dir.join("FFmpeg.EXE");
+        std::fs::write(&exe, b"").unwrap();
+        assert_eq!(configured_ffmpeg(exe.to_str().unwrap()).unwrap(), exe);
+
+        let other = dir.join("sh");
+        std::fs::write(&other, b"").unwrap();
+        for wrong in [other.to_str().unwrap(), dir.join("ffmpeg.sh").to_str().unwrap(), dir.to_str().unwrap()] {
+            let err = configured_ffmpeg(wrong).unwrap_err();
+            assert!(err.contains("not an ffmpeg"), "{wrong}: {err}");
+        }
+        let err = configured_ffmpeg(dir.join("missing").join("ffmpeg").to_str().unwrap()).unwrap_err();
+        assert!(err.contains("not found"), "{err}");
+        let err = configured_ffmpeg("ffmpeg").unwrap_err();
+        assert!(err.contains("not found"), "relative names are not searched: {err}");
+        let err = configured_ffmpeg(dir.join("ffmpeg-dir").to_str().unwrap()).unwrap_err();
+        assert!(err.contains("not an ffmpeg"), "{err}");
     }
 }

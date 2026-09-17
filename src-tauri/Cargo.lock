@@ -4242,10 +4242,10 @@ name = "socorin"
 version = "1.0.2"
 dependencies = [
  "chrono",
+ "glob",
  "gtk",
  "libc",
  "objc2",
- "percent-encoding",
  "reqwest",
  "rfd",
  "rustls",

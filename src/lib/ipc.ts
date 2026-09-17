@@ -150,16 +150,17 @@ export const ipc = {
   beginAnnotation: (monitorId: number) => invoke<void>("begin_annotation", { monitorId }),
   /** Ends the capture session (hides the overlays); same as cancelling. */
   endCapture: () => invoke<void>("cancel_capture"),
-  /** Ends the session, shows the system "Save as" dialog and writes the PNG. */
-  savePngAs: (png: Uint8Array) => invoke<void>("save_png_as", png),
+  /**
+   * Ends a running session, shows the system "Save as" dialog (in Rust: the
+   * page never names a destination) and writes the PNG. Resolves to the
+   * saved path, or null when the dialog was cancelled.
+   */
+  savePngAs: (png: Uint8Array) => invoke<string | null>("save_png_as", png),
   /** Ends the session and opens the PNG in the editor window. */
   editPng: (png: Uint8Array) => invoke<void>("edit_png", png),
   pendingImage: () => invoke<ArrayBuffer>("pending_image"),
-  /** Saves PNG bytes; without `path` an auto-named file goes to the save dir. Returns the path. */
-  savePng: (png: Uint8Array, path?: string) =>
-    invoke<string>("save_png", png, {
-      headers: path ? { "x-path": encodeURIComponent(path) } : {},
-    }),
+  /** Saves PNG bytes to an auto-named file in the save dir. Returns the path. */
+  savePng: (png: Uint8Array) => invoke<string>("save_png", png),
   copyPng: (png: Uint8Array) => invoke<void>("copy_png", png),
   /** Pick an area on the overlay and record it (stops a running recording). */
   startRecordRegion: () => invoke<void>("start_record_region"),

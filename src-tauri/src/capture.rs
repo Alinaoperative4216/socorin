@@ -503,6 +503,12 @@ fn end_session<R: Runtime>(app: &AppHandle<R>) {
     state.busy.store(false, Ordering::SeqCst);
 }
 
+/// The editor window is gone: drop the PNG kept for it, so the last
+/// screenshot does not stay in memory for the rest of the app's life.
+pub fn forget_pending<R: Runtime>(app: &AppHandle<R>) {
+    *app.state::<AppState>().pending.lock().unwrap() = None;
+}
+
 /// "Open in editor" from the in-place editor: the annotated PNG replaces
 /// the overlay session and opens in the editor window.
 pub fn edit_png<R: Runtime>(app: &AppHandle<R>, png: Vec<u8>) -> Result<(), String> {
@@ -511,62 +517,75 @@ pub fn edit_png<R: Runtime>(app: &AppHandle<R>, png: Vec<u8>) -> Result<(), Stri
     windows::open_editor(app)
 }
 
-/// "Save as…" from the in-place editor. The overlays are hidden first so the
-/// system dialog is not stuck behind them, then the dialog runs on a worker
-/// thread (it blocks). The result is reported through `capture-done` /
-/// `capture-error` like the immediate modes.
-pub fn save_png_as<R: Runtime>(app: &AppHandle<R>, png: Vec<u8>) {
-    end_session(app);
+/// "Save as…" from the in-place editor or the editor window: the system
+/// dialog picks the destination and the PNG is written there. The dialog is
+/// the only way a webview can name a file outside the save folder, and it
+/// runs here in Rust, so the webviews never send paths. A running overlay
+/// session is ended first so the dialog is not stuck behind the overlays;
+/// the dialog blocks, so it runs on a worker thread. Resolves to the saved
+/// path, or `None` when the dialog was cancelled; the outcome is also
+/// reported through `capture-done` / `capture-error` like the immediate
+/// modes.
+pub async fn save_png_as<R: Runtime>(app: &AppHandle<R>, png: Vec<u8>) -> Result<Option<PathBuf>, String> {
+    if is_busy(app) {
+        end_session(app);
+    }
     let app = app.clone();
-    std::thread::spawn(move || {
-        let settings = settings::current(&app);
-        let dir = settings::save_dir(&app);
-        let _ = std::fs::create_dir_all(&dir);
-        let file_name = stamped_name(&settings.file_prefix, &time_stamp(), "png", 1);
+    tauri::async_runtime::spawn_blocking(move || save_png_dialog(&app, &png))
+        .await
+        .map_err(|e| format!("save as: {e}"))?
+}
 
-        // macOS: every window of ours is hidden now, and the plugin's dialog
-        // would attach itself as a sheet to the first one (never visible). Use
-        // rfd's modal panel directly: it has no parent, temporarily makes the
-        // app a regular one and brings the panel to the front.
-        #[cfg(target_os = "macos")]
-        let picked: Option<PathBuf> = rfd::FileDialog::new()
-            .set_title("Save screenshot")
-            .set_directory(&dir)
-            .set_file_name(&file_name)
-            .add_filter("PNG image", &["png"])
-            .save_file();
-        #[cfg(not(target_os = "macos"))]
-        let picked: Option<PathBuf> = app
-            .dialog()
-            .file()
-            .set_title("Save screenshot")
-            .set_directory(&dir)
-            .set_file_name(&file_name)
-            .add_filter("PNG image", &["png"])
-            .blocking_save_file()
-            .and_then(|p| p.into_path().ok());
+fn save_png_dialog<R: Runtime>(app: &AppHandle<R>, png: &[u8]) -> Result<Option<PathBuf>, String> {
+    let settings = settings::current(app);
+    let dir = settings::save_dir(app);
+    let _ = std::fs::create_dir_all(&dir);
+    let file_name = stamped_name(&settings.file_prefix, &time_stamp(), "png", 1);
 
-        let Some(path) = picked else {
-            debug::log("save as: cancelled");
-            return;
-        };
-        let result = save_png(&app, &png, Some(path)).and_then(|path| {
-            if settings.copy_on_save {
-                copy_png(&app, &png)?;
-            }
-            Ok(path)
-        });
-        match result {
-            Ok(path) => {
-                debug::log(format!("saved {}", path.display()));
-                let _ = app.emit("capture-done", path.to_string_lossy().into_owned());
-            }
-            Err(e) => {
-                eprintln!("[capture] {e}");
-                let _ = app.emit("capture-error", e);
-            }
+    // macOS: every window of ours may be hidden now, and the plugin's dialog
+    // would attach itself as a sheet to the first one (never visible). Use
+    // rfd's modal panel directly: it has no parent, temporarily makes the
+    // app a regular one and brings the panel to the front.
+    #[cfg(target_os = "macos")]
+    let picked: Option<PathBuf> = rfd::FileDialog::new()
+        .set_title("Save screenshot")
+        .set_directory(&dir)
+        .set_file_name(&file_name)
+        .add_filter("PNG image", &["png"])
+        .save_file();
+    #[cfg(not(target_os = "macos"))]
+    let picked: Option<PathBuf> = app
+        .dialog()
+        .file()
+        .set_title("Save screenshot")
+        .set_directory(&dir)
+        .set_file_name(&file_name)
+        .add_filter("PNG image", &["png"])
+        .blocking_save_file()
+        .and_then(|p| p.into_path().ok());
+
+    let Some(path) = picked else {
+        debug::log("save as: cancelled");
+        return Ok(None);
+    };
+    let result = save_png(app, png, Some(path)).and_then(|path| {
+        if settings.copy_on_save {
+            copy_png(app, png)?;
         }
+        Ok(path)
     });
+    match result {
+        Ok(path) => {
+            debug::log(format!("saved {}", path.display()));
+            let _ = app.emit("capture-done", path.to_string_lossy().into_owned());
+            Ok(Some(path))
+        }
+        Err(e) => {
+            eprintln!("[capture] {e}");
+            let _ = app.emit("capture-error", e.clone());
+            Err(e)
+        }
+    }
 }
 
 /// Route a finished PNG according to the "after capture" setting.
@@ -602,8 +621,9 @@ pub fn copy_png<R: Runtime>(app: &AppHandle<R>, png: &[u8]) -> Result<(), String
 
 /// Write PNG bytes to `path`, or to a new auto-named file in the save dir.
 ///
-/// `path` comes from a save dialog, so replacing an existing file there is
-/// the user's decision; it does have to be a `.png` (a missing extension is
+/// `path` only ever comes from the save dialog in `save_png_dialog` (the
+/// webviews cannot pass one), so replacing an existing file there is the
+/// user's decision; it does have to be a `.png` (a missing extension is
 /// added, a different one refused).
 pub fn save_png<R: Runtime>(app: &AppHandle<R>, png: &[u8], path: Option<PathBuf>) -> Result<PathBuf, String> {
     let Some(path) = path else {
@@ -670,9 +690,19 @@ pub(crate) fn write_new(dir: &Path, prefix: &str, ext: &str, bytes: &[u8]) -> Re
     Err(format!("too many files named {prefix}_{stamp} in {}", dir.display()))
 }
 
-/// A free auto-named path in `dir` for a file another program writes (the
-/// recording encoders). Unlike `write_new` this only looks, so the name is
-/// reserved by the encoder, not here.
+/// An auto-named path in `dir` for a file another program writes (the
+/// recording encoders), reserved here: the empty file is created with
+/// `create_new`, so nothing can be slipped in under that name between
+/// choosing it and the encoder opening it. Only for encoders that overwrite
+/// (ffmpeg `-y`); see `free_path` for the other kind.
+pub(crate) fn reserve_path(dir: &Path, prefix: &str, ext: &str) -> Result<PathBuf, String> {
+    write_new(dir, prefix, ext, &[])
+}
+
+/// A free auto-named path in `dir` for an encoder that refuses to write to
+/// an existing path (macOS `screencapture`, which also refuses a symlink
+/// there, so a name planted meanwhile only makes the recording fail). This
+/// only looks; the name is taken by the encoder, not here.
 pub(crate) fn free_path(dir: &Path, prefix: &str, ext: &str) -> Result<PathBuf, String> {
     std::fs::create_dir_all(dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
     let stamp = time_stamp();
@@ -873,6 +903,12 @@ mod session_tests {
         let free = free_path(&dir, "Clip", "mov").unwrap();
         assert!(free.to_string_lossy().ends_with(".mov"));
         assert!(!free.exists());
+
+        // A reserved name exists (empty) right away, and the next one differs.
+        let reserved = reserve_path(&dir, "Clip", "mp4").unwrap();
+        assert!(reserved.to_string_lossy().ends_with(".mp4"));
+        assert_eq!(std::fs::metadata(&reserved).unwrap().len(), 0);
+        assert_ne!(reserve_path(&dir, "Clip", "mp4").unwrap(), reserved);
     }
 
     /// The entry points are re-entrancy guarded: while a session runs they

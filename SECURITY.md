@@ -29,10 +29,13 @@ Examples of what we treat as a vulnerability:
   a way around the *Allow command-line triggers* switch.
 - Installing an update that is not signed with the project's updater key,
   or reading the manifest from anywhere but the configured endpoint.
-- Writing outside the chosen screenshots folder (the file-name prefix is
-  sanitised for this reason).
+- Writing outside the chosen screenshots folder other than through the
+  system save dialog (the file-name prefix is sanitised, and the webviews
+  cannot name a destination: the dialog runs on the Rust side).
 - Running an `ffmpeg` other than the configured one or the one found on
-  `PATH`.
+  `PATH`, or making the configured path run anything but `ffmpeg`.
+- A webview reaching a plugin command or a URL its capability
+  (`src-tauri/capabilities/default.json`) does not list.
 - Anything the webviews' Content Security Policy is meant to prevent.
 
 The behaviour of the third-party programs the app calls (`screencapture`,

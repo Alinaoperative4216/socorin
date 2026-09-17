@@ -137,7 +137,13 @@ export function InPlaceEditor({ source, crop, scale, hidden, onLockChange, setti
     [run, renderPng],
   );
   // Rust hides the overlays before showing the dialog and writes the file.
-  const saveAs = useCallback(() => run(async () => ipc.savePngAs(await renderPng())), [run, renderPng]);
+  const saveAs = useCallback(
+    () =>
+      run(async () => {
+        await ipc.savePngAs(await renderPng());
+      }),
+    [run, renderPng],
+  );
   const edit = useCallback(() => run(async () => ipc.editPng(await renderPng())), [run, renderPng]);
   const close = useCallback(() => void ipc.endCapture(), []);
 

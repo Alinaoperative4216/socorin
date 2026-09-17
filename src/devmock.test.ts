@@ -88,8 +88,9 @@ describe("devmock", () => {
       ["stop_recording"],
       ["copy_png", buf],
       ["finish_region", { region: {} }],
-      ["save_png", buf, { headers: {} }],
+      ["save_png", buf],
       ["save_png", new Uint8Array(3)],
+      ["save_png_as", buf],
       ["cancel_capture"],
       ["totally_unknown", { a: 1 }],
       ["another_unknown"],
@@ -97,7 +98,7 @@ describe("devmock", () => {
     for (const [cmd, args, options] of calls) await internals().invoke(cmd, args, options);
     expect(await internals().invoke("save_png", buf)).toBe("/Users/mock/Pictures/Screenshots/mock.png");
     expect(await internals().invoke("totally_unknown")).toBeNull();
-    expect(await internals().invoke("plugin:dialog|save")).toBe("/Users/mock/Pictures/Screenshots/save-as.png");
+    expect(await internals().invoke("save_png_as", buf)).toBe("/Users/mock/Pictures/Screenshots/save-as.png");
     expect(await internals().invoke("plugin:dialog|open")).toBe("/Users/mock/Pictures/Other");
     expect(await internals().invoke("plugin:event|listen")).toBe(1);
     const status = (await internals().invoke("recording_status")) as { recording: boolean };

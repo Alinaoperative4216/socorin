@@ -1,7 +1,5 @@
 //! Tauri commands exposed to the webviews.
 
-use std::path::PathBuf;
-
 use serde::Serialize;
 use tauri::{
     ipc::{InvokeBody, Request, Response},
@@ -131,13 +129,15 @@ pub fn edit_png<R: Runtime>(app: AppHandle<R>, request: Request<'_>) -> Result<(
     capture::edit_png(&app, png)
 }
 
-/// Body: PNG bytes. Ends the session and asks where to save through the
-/// system dialog (asynchronously; the outcome arrives as an event).
+/// Body: PNG bytes. Ends a running session and asks where to save through
+/// the system dialog; resolves to the saved path, or `null` when the dialog
+/// was cancelled. This is the only way a webview gets a PNG to a place of
+/// its choosing: the dialog runs in Rust, no path crosses the IPC.
 #[tauri::command]
-pub fn save_png_as<R: Runtime>(app: AppHandle<R>, request: Request<'_>) -> Result<(), String> {
+pub async fn save_png_as<R: Runtime>(app: AppHandle<R>, request: Request<'_>) -> Result<Option<String>, String> {
     let png = raw_body(&request)?;
-    capture::save_png_as(&app, png);
-    Ok(())
+    let saved = capture::save_png_as(&app, png).await?;
+    Ok(saved.map(|p| p.to_string_lossy().into_owned()))
 }
 
 /// PNG bytes of the image the editor should display.
@@ -158,28 +158,15 @@ fn raw_body(request: &Request<'_>) -> Result<Vec<u8>, String> {
     }
 }
 
-fn header_path(request: &Request<'_>, name: &str) -> Option<PathBuf> {
-    request
-        .headers()
-        .get(name)
-        .and_then(|v| v.to_str().ok())
-        .filter(|s| !s.is_empty())
-        .map(|s| {
-            percent_encoding::percent_decode_str(s)
-                .decode_utf8_lossy()
-                .into_owned()
-        })
-        .map(PathBuf::from)
-}
-
-/// Body: PNG bytes. Optional header `x-path` (percent-encoded) picks the
-/// destination; otherwise an auto-named file in the save dir. Returns the path.
+/// Body: PNG bytes, written to a new auto-named file in the save dir.
+/// Returns the path. There is deliberately no way to name the destination:
+/// a webview that could would be able to write a `.png` anywhere the user
+/// can (see `save_png_as` for the dialog-driven way).
 #[tauri::command]
 pub fn save_png<R: Runtime>(app: AppHandle<R>, request: Request<'_>) -> Result<String, String> {
     let png = raw_body(&request)?;
-    let path = header_path(&request, "x-path");
     let settings = settings::current(&app);
-    let saved = capture::save_png(&app, &png, path)?;
+    let saved = capture::save_png(&app, &png, None)?;
     debug::log(format!("saved {} ({} bytes)", saved.display(), png.len()));
     if settings.copy_on_save {
         capture::copy_png(&app, &png)?;
@@ -282,6 +269,11 @@ pub fn update_settings<R: Runtime>(
     let previous = settings::current(&app);
     let mut settings = settings::merge(&previous, &patch)?;
     settings::normalise(&app, &mut settings);
+
+    // The recorder runs whatever this names, so it has to be an ffmpeg.
+    if patch.contains_key("ffmpegPath") && !settings.ffmpeg_path.is_empty() {
+        record::configured_ffmpeg(&settings.ffmpeg_path)?;
+    }
 
     // Validate hotkeys by registering them; roll back on failure. Only when
     // the settings window saved them: re-registering drops the global Escape
@@ -527,7 +519,7 @@ mod tests {
     }
 
     #[test]
-    fn png_commands_take_raw_bodies_and_the_path_header() {
+    fn png_commands_take_raw_bodies_and_never_a_path() {
         let dir = temp_dir("cmd-png");
         let app = app_with(settings_in(&dir));
         let handle = app.handle().clone();
@@ -540,13 +532,14 @@ mod tests {
         assert!(path.starts_with(dir.to_str().unwrap()));
         assert_eq!(std::fs::read(&path).unwrap(), b"png");
 
-        let target = dir.join("chosen dir").join("my shot.png");
-        let encoded = percent_encoding::utf8_percent_encode(target.to_str().unwrap(), percent_encoding::NON_ALPHANUMERIC).to_string();
-        let saved = invoke(&handle, "save_png", InvokeBody::Raw(b"two".to_vec()), &[("x-path", &encoded)]).unwrap();
-        assert_eq!(saved.deserialize::<String>().unwrap(), target.to_string_lossy());
-        assert_eq!(std::fs::read(&target).unwrap(), b"two");
-        // An empty header means "auto-name".
-        assert!(invoke(&handle, "save_png", InvokeBody::Raw(b"x".to_vec()), &[("x-path", "")]).is_ok());
+        // A webview naming the destination (as an older frontend did through
+        // `x-path`) is ignored: the file still lands in the save folder.
+        let elsewhere = temp_dir("cmd-png-elsewhere").join("planted.png");
+        let saved = invoke(&handle, "save_png", InvokeBody::Raw(b"two".to_vec()), &[("x-path", elsewhere.to_str().unwrap())]).unwrap();
+        let path: String = saved.deserialize().unwrap();
+        assert!(path.starts_with(dir.to_str().unwrap()));
+        assert!(!elsewhere.exists());
+        assert_eq!(std::fs::read(&path).unwrap(), b"two");
 
         let err = invoke(&handle, "copy_png", InvokeBody::Raw(b"nope".to_vec()), &[]).unwrap_err();
         assert!(err.as_str().unwrap().contains("Unsupported") || !err.as_str().unwrap().is_empty());
@@ -588,6 +581,22 @@ mod tests {
         assert!(!get_settings(handle.clone()).autostart);
 
         assert!(update_settings(handle.clone(), patch(json!({ "copyOnSave": "yes" }))).is_err());
+
+        // The recorder runs the configured binary, so only an existing
+        // `ffmpeg` is accepted; empty means "search for it".
+        let fake = dir.join("ffmpeg");
+        std::fs::write(&fake, b"#!/bin/sh\n").unwrap();
+        let not_ffmpeg = dir.join("other");
+        std::fs::write(&not_ffmpeg, b"#!/bin/sh\n").unwrap();
+        let err = update_settings(handle.clone(), patch(json!({ "ffmpegPath": not_ffmpeg.to_str().unwrap() }))).unwrap_err();
+        assert!(err.contains("not an ffmpeg"), "{err}");
+        let err = update_settings(handle.clone(), patch(json!({ "ffmpegPath": dir.join("missing").join("ffmpeg").to_str().unwrap() }))).unwrap_err();
+        assert!(err.contains("not found"), "{err}");
+        assert_eq!(get_settings(handle.clone()).ffmpeg_path, "");
+        let updated = update_settings(handle.clone(), patch(json!({ "ffmpegPath": fake.to_str().unwrap() }))).unwrap();
+        assert_eq!(updated.ffmpeg_path, fake.to_string_lossy());
+        update_settings(handle.clone(), patch(json!({ "ffmpegPath": " " }))).unwrap();
+        assert_eq!(get_settings(handle.clone()).ffmpeg_path, "");
 
         // Through the IPC layer as well.
         let res = invoke(&handle, "get_settings", InvokeBody::default(), &[]).unwrap();

@@ -26,12 +26,19 @@ if [ -n "${CARGO_TARGET_DIR:-}" ]; then
 fi
 # makensis signs the uninstaller itself (!uninstfinalize -> scripts/windows-sign.sh),
 # so the certificate and its settings have to reach the container as well.
+# The variables are passed by name only (`-e NAME`): docker takes the value
+# from this environment, so the password never shows up on the `docker run`
+# command line in the host's process list.
 ENV=()
 if [ -n "${WINDOWS_SIGN_PFX:-}" ]; then
   WINDOWS_SIGN_PFX="$(cd "$(dirname "$WINDOWS_SIGN_PFX")" && pwd)/$(basename "$WINDOWS_SIGN_PFX")"
+  export WINDOWS_SIGN_PFX
   MOUNTS+=(-v "$WINDOWS_SIGN_PFX:$WINDOWS_SIGN_PFX:ro")
   for v in WINDOWS_SIGN_PFX WINDOWS_SIGN_PASSWORD WINDOWS_SIGN_TIMESTAMP_URL; do
-    [ -n "${!v:-}" ] && ENV+=(-e "$v=${!v}")
+    if [ -n "${!v:-}" ]; then
+      export "$v"
+      ENV+=(-e "$v")
+    fi
   done
 fi
 exec docker run --rm "${MOUNTS[@]}" ${ENV[@]+"${ENV[@]}"} -w "$PWD" "$IMAGE" "$@"

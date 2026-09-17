@@ -242,7 +242,9 @@ Two dev aids exist so the whole pipeline can be exercised automatically:
 - **Recording on Windows / Linux** uses `ffmpeg`. The app looks for it in the
   usual install locations and then in the absolute entries of `PATH` (never
   the working directory); *Settings → Recording* takes an explicit path when
-  it lives elsewhere. macOS records with the system `screencapture`.
+  it lives elsewhere (it has to be the `ffmpeg` binary itself: the setting
+  cannot point the recorder at another program). macOS records with the
+  system `screencapture`.
 
 ## Contributing
 

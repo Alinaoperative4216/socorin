@@ -41,7 +41,6 @@ tauri-plugin-dialog = "2.7.3"
 # save panel on macOS (see capture::save_png_as).
 rfd = { version = "0.16", default-features = false }
 chrono = "0.4.45"
-percent-encoding = "2.3.2"
 # Update check (daily read of socorin.com/version.json) and install. reqwest
 # and rustls are the plugin's own; `rustls-no-provider` mirrors its feature
 # set, so the app installs the ring provider before the first request.
@@ -83,3 +82,6 @@ gtk = "0.18"
 [dev-dependencies]
 # `tauri::test` (mock runtime) for the unit tests; never part of the app.
 tauri = { version = "2", features = ["image-png", "tray-icon", "macos-private-api", "test"] }
+# The pattern matcher the opener plugin applies to its URL scope, so the
+# capability file can be checked against the URLs the pages open.
+glob = "0.3"

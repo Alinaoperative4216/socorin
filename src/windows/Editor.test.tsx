@@ -45,26 +45,24 @@ describe("Editor window", () => {
 
     fireEvent.click(screen.getByTitle("Save to screenshots folder (Ctrl/⌘+S)"));
     await screen.findByText("Saved to /tmp/shots/Socorin_1.png");
-    expect(tauri.invoke).toHaveBeenCalledWith("save_png", expect.any(Uint8Array), { headers: {} });
+    expect(tauri.invoke).toHaveBeenCalledWith("save_png", expect.any(Uint8Array), undefined);
 
-    tauri.handlers["plugin:dialog|save"] = () => "/elsewhere/pic.png";
-    tauri.handlers.save_png = () => "/elsewhere/pic.png";
+    // Save as… goes through Rust's own dialog: the page sends the PNG only,
+    // never a path, and learns where it went from the reply.
+    tauri.handlers.save_png_as = () => "/elsewhere/pic.png";
     fireEvent.click(screen.getByTitle("Save as… (Ctrl/⌘+Shift+S)"));
     await screen.findByText("Saved to /elsewhere/pic.png");
-    const dialog = tauri.calls("plugin:dialog|save")[0] as { options: { defaultPath: string } };
-    expect(dialog.options.defaultPath).toMatch(/^\/tmp\/shots\/Socorin_\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}\.png$/);
-    expect(tauri.invoke).toHaveBeenLastCalledWith("save_png", expect.any(Uint8Array), {
-      headers: { "x-path": encodeURIComponent("/elsewhere/pic.png") },
-    });
+    expect(tauri.invoke).toHaveBeenLastCalledWith("save_png_as", expect.any(Uint8Array), undefined);
+    expect(tauri.calls("plugin:dialog|save")).toHaveLength(0);
   });
 
   it("does nothing when the save dialog is cancelled and reports failures", async () => {
     await mountLoaded();
-    tauri.handlers["plugin:dialog|save"] = () => null;
-    const before = tauri.calls("save_png").length;
+    tauri.handlers.save_png_as = () => null;
     fireEvent.click(screen.getByTitle("Save as… (Ctrl/⌘+Shift+S)"));
     await flush();
-    expect(tauri.calls("save_png")).toHaveLength(before);
+    expect(tauri.calls("save_png_as")).toHaveLength(1);
+    expect(screen.queryByText(/Saved to/)).toBeNull();
 
     tauri.handlers.copy_png = () => Promise.reject("clipboard busy");
     fireEvent.click(screen.getByTitle("Copy to clipboard (Ctrl/⌘+C)"));
@@ -78,9 +76,9 @@ describe("Editor window", () => {
     await screen.findByText("Copied to clipboard");
     fireEvent.keyDown(window, { key: "s", ...mod });
     await waitFor(() => expect(tauri.calls("save_png")).toHaveLength(1));
-    tauri.handlers["plugin:dialog|save"] = () => null;
+    tauri.handlers.save_png_as = () => null;
     fireEvent.keyDown(window, { key: "S", shiftKey: true, ...mod });
-    await waitFor(() => expect(tauri.calls("plugin:dialog|save")).toHaveLength(1));
+    await waitFor(() => expect(tauri.calls("save_png_as")).toHaveLength(1));
 
     // 58% sits between the 50% and 67% steps: zooming in lands on the step above 67%.
     fireEvent.keyDown(window, { key: "=", ...mod });

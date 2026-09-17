@@ -1,8 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { listen } from "@tauri-apps/api/event";
-import { save as saveDialog } from "@tauri-apps/plugin-dialog";
-import { ipc, timestamp, type Settings } from "../lib/ipc";
+import { ipc, type Settings } from "../lib/ipc";
 import { isMac } from "../lib/hotkey";
 import { AnnotationStage } from "../editor/AnnotationStage";
 import { Toolbar, TOOLS } from "../editor/Toolbar";
@@ -158,20 +157,14 @@ export function Editor() {
     [run, a.renderPng, notify],
   );
 
+  // The dialog runs in Rust (see save_png_as): the page never names a path.
   const saveAs = useCallback(
     () =>
       run(async () => {
-        const prefix = settings?.filePrefix || "Socorin";
-        const dir = settings?.saveDir ? settings.saveDir.replace(/[\\/]+$/, "") : "";
-        const path = await saveDialog({
-          defaultPath: `${dir ? dir + (isMac || !dir.includes("\\") ? "/" : "\\") : ""}${prefix}_${timestamp()}.png`,
-          filters: [{ name: "PNG image", extensions: ["png"] }],
-        });
-        if (!path) return;
-        const saved = await ipc.savePng(await a.renderPng(), path);
-        notify(`Saved to ${saved}`);
+        const saved = await ipc.savePngAs(await a.renderPng());
+        if (saved) notify(`Saved to ${saved}`);
       }),
-    [run, a.renderPng, notify, settings],
+    [run, a.renderPng, notify],
   );
 
   actionsRef.current = { copy, quickSave };

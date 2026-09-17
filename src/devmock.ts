@@ -109,7 +109,10 @@ const handlers: Record<string, Handler> = {
     console.log("[mock] cancel_capture → reload");
     window.setTimeout(() => location.reload(), 300);
   },
-  save_png_as: async (args) => console.log("[mock] save_png_as", (args as ArrayBuffer).byteLength, "bytes"),
+  save_png_as: async (args) => {
+    console.log("[mock] save_png_as", (args as ArrayBuffer).byteLength, "bytes");
+    return "/Users/mock/Pictures/Screenshots/save-as.png";
+  },
   edit_png: async (args) => console.log("[mock] edit_png", (args as ArrayBuffer).byteLength, "bytes"),
   overlay_ready: async (args) => console.log("[mock] overlay_ready", JSON.stringify(args)),
   overlay_pixels: async () => {
@@ -153,16 +156,15 @@ const handlers: Record<string, Handler> = {
   cancel_recording: async () => console.log("[mock] cancel_recording"),
   recording_status: async () => ({ recording: true, startedMs: Date.now() - 65_000, path: "/Users/mock/Pictures/Screenshots/Screenshot.mov" }),
   default_save_dir: async () => "/Users/mock/Pictures/Screenshots",
-  save_png: async (args, options) => {
+  save_png: async (args) => {
     const bytes = args instanceof Uint8Array ? args.byteLength : (args as ArrayBuffer).byteLength;
-    console.log("[mock] save_png", bytes, "bytes", options);
+    console.log("[mock] save_png", bytes, "bytes");
     return "/Users/mock/Pictures/Screenshots/mock.png";
   },
   copy_png: async (args) => {
     console.log("[mock] copy_png", (args as ArrayBuffer).byteLength, "bytes");
   },
   finish_region: async (args) => console.log("[mock] finish_region", JSON.stringify(args)),
-  "plugin:dialog|save": async () => "/Users/mock/Pictures/Screenshots/save-as.png",
   "plugin:dialog|open": async () => "/Users/mock/Pictures/Other",
   "plugin:event|listen": async () => 1,
 };

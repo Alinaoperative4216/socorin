@@ -170,13 +170,29 @@ pub fn load<R: Runtime>(app: &AppHandle<R>) -> Settings {
     settings
 }
 
+/// Writes the whole file to a temporary name first and renames it over the
+/// old one, so a crash mid-write leaves the previous settings rather than a
+/// truncated file (which `load` would silently replace with the defaults —
+/// autostart on, the command-line triggers off).
 pub fn save<R: Runtime>(app: &AppHandle<R>, settings: &Settings) -> Result<(), String> {
     let path = config_file(app).ok_or("cannot resolve config dir")?;
-    if let Some(dir) = path.parent() {
-        fs::create_dir_all(dir).map_err(|e| e.to_string())?;
-    }
     let json = serde_json::to_string_pretty(settings).map_err(|e| e.to_string())?;
-    fs::write(&path, json).map_err(|e| e.to_string())
+    write_atomically(&path, json.as_bytes())
+}
+
+fn write_atomically(path: &std::path::Path, bytes: &[u8]) -> Result<(), String> {
+    let dir = path.parent().ok_or("settings path has no directory")?;
+    fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(&format!(".{}.tmp", std::process::id()));
+    let tmp = PathBuf::from(tmp);
+    let written = fs::write(&tmp, bytes)
+        .and_then(|()| fs::rename(&tmp, path))
+        .map_err(|e| format!("cannot write {}: {e}", path.display()));
+    if written.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    written
 }
 
 /// Snapshot of the current settings.
@@ -366,6 +382,25 @@ mod app_tests {
 
         std::fs::write(&path, "{ not json").unwrap();
         assert_eq!(load(handle).hotkey, "CmdOrCtrl+Shift+A");
+    }
+
+    /// The file is replaced in one step: no temporary file is left behind,
+    /// and a write that cannot finish leaves the old contents intact.
+    #[test]
+    fn saving_replaces_the_file_atomically() {
+        let dir = temp_dir("settings-atomic");
+        let path = dir.join("settings.json");
+        write_atomically(&path, b"first").unwrap();
+        write_atomically(&path, b"second").unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"second");
+        let leftovers: Vec<_> = std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name()).collect();
+        assert_eq!(leftovers, vec![std::ffi::OsString::from("settings.json")]);
+
+        // The target's directory is a file: nothing can be written there.
+        let blocked = path.join("settings.json");
+        assert!(write_atomically(&blocked, b"third").is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), b"second");
+        assert!(write_atomically(std::path::Path::new("/"), b"x").is_err());
     }
 
     #[test]

@@ -99,25 +99,7 @@ pub(crate) fn configure<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri:
         .manage(capture::AppState::default())
         .manage(record::RecordState::default())
         .manage(update::UpdateState::default())
-        .on_window_event(|window, event| match event {
-            // The settings window is hidden, not destroyed, so the app keeps
-            // living in the tray.
-            tauri::WindowEvent::CloseRequested { api, .. } => {
-                if window.label() == windows::MAIN {
-                    api.prevent_close();
-                    let _ = window.hide();
-                } else if window.label() == windows::WELCOME {
-                    // Closed by other means than OK (window manager, Cmd+W):
-                    // still do not nag again.
-                    let _ = settings::mark_welcome_shown(window.app_handle());
-                }
-            }
-            // The update popover goes away when the user clicks elsewhere.
-            tauri::WindowEvent::Focused(false) if window.label() == windows::UPDATE => {
-                update::blurred(window.app_handle());
-            }
-            _ => {}
-        })
+        .on_window_event(on_window_event)
         .invoke_handler(tauri::generate_handler![
             commands::platform_info,
             commands::request_screen_permission,
@@ -158,6 +140,33 @@ pub(crate) fn configure<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri:
             commands::update_ready,
             commands::quit,
         ])
+}
+
+/// The window-close policy, the popover's blur and the editor's clean-up.
+fn on_window_event<R: tauri::Runtime>(window: &tauri::Window<R>, event: &tauri::WindowEvent) {
+    match event {
+        // The settings window is hidden, not destroyed, so the app keeps
+        // living in the tray.
+        tauri::WindowEvent::CloseRequested { api, .. } => {
+            if window.label() == windows::MAIN {
+                api.prevent_close();
+                let _ = window.hide();
+            } else if window.label() == windows::WELCOME {
+                // Closed by other means than OK (window manager, Cmd+W):
+                // still do not nag again.
+                let _ = settings::mark_welcome_shown(window.app_handle());
+            }
+        }
+        // The update popover goes away when the user clicks elsewhere.
+        tauri::WindowEvent::Focused(false) if window.label() == windows::UPDATE => {
+            update::blurred(window.app_handle());
+        }
+        // The editor is closed: its screenshot need not stay in memory.
+        tauri::WindowEvent::Destroyed if window.label() == windows::EDITOR => {
+            capture::forget_pending(window.app_handle());
+        }
+        _ => {}
+    }
 }
 
 /// `--capture` / `--capture-full` trigger a capture, `--record` /
@@ -273,6 +282,73 @@ mod tests {
         handle_cli_args(&app, &args(&[]), true); // second launch: settings window
         handle_cli_args(&app, &args(&[]), false); // first launch: nothing
         assert!(!record::is_recording(&app));
+    }
+
+    /// The capability file is what the webviews may call. The mock runtime
+    /// does not load it, so it is checked here as data: only the pages'
+    /// own needs, and the opener limited to the two socorin.com links,
+    /// matched the way the plugin does (glob patterns).
+    #[test]
+    fn the_capability_grants_the_pages_nothing_beyond_their_needs() {
+        use tauri::utils::acl::capability::{Capability, PermissionEntry};
+        let json = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/capabilities/default.json")).unwrap();
+        let capability: Capability = serde_json::from_str(&json).unwrap();
+        let identifiers: Vec<String> = capability.permissions.iter().map(|p| p.identifier().get().to_string()).collect();
+        for gone in ["opener:default", "dialog:allow-save", "dialog:allow-message", "clipboard-manager:allow-write-image"] {
+            assert!(!identifiers.iter().any(|i| i == gone), "{gone} is not needed by any page");
+        }
+        assert!(identifiers.iter().any(|i| i == "dialog:allow-open"), "the settings folder picker");
+
+        let opener = capability
+            .permissions
+            .iter()
+            .find_map(|p| match p {
+                PermissionEntry::ExtendedPermission { identifier, scope } if identifier.get() == "opener:allow-open-url" => Some(scope),
+                _ => None,
+            })
+            .expect("opener:allow-open-url with a scope");
+        assert!(opener.deny.is_none());
+        let patterns: Vec<glob::Pattern> = opener
+            .allow
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|entry| {
+                let url = serde_json::to_value(entry).unwrap()["url"].as_str().unwrap().to_string();
+                glob::Pattern::new(&url).unwrap()
+            })
+            .collect();
+        let allowed = |url: &str| patterns.iter().any(|p| p.matches(url));
+        // What Settings and the update popover open.
+        assert!(allowed("https://socorin.com"));
+        assert!(allowed("https://socorin.com/#download"));
+        assert!(allowed("https://socorin.com/downloads/x"));
+        for other in ["https://socorin.com.evil.example/", "https://evil.example/", "http://socorin.com/", "mailto:x@socorin.com", "file:///etc/passwd"] {
+            assert!(!allowed(other), "{other} must not be openable");
+        }
+    }
+
+    #[test]
+    fn closing_the_editor_forgets_its_screenshot() {
+        let dir = temp_dir("editor-destroyed");
+        let app = app_with(settings_in(&dir));
+        let state = app.state::<capture::AppState>();
+        *state.pending.lock().unwrap() = Some(b"\x89PNG".to_vec());
+        windows::open_editor(&app).unwrap();
+        let editor = app.get_webview_window(windows::EDITOR).unwrap();
+        let editor = editor.as_ref().window();
+
+        // Other events, and other windows going away, keep it.
+        on_window_event(&editor, &tauri::WindowEvent::Focused(false));
+        assert!(state.pending.lock().unwrap().is_some());
+        windows::show_update_notice(&app).unwrap();
+        let popover = app.get_webview_window(windows::UPDATE).unwrap();
+        on_window_event(&popover.as_ref().window(), &tauri::WindowEvent::Destroyed);
+        on_window_event(&popover.as_ref().window(), &tauri::WindowEvent::Focused(false));
+        assert!(state.pending.lock().unwrap().is_some());
+
+        on_window_event(&editor, &tauri::WindowEvent::Destroyed);
+        assert!(state.pending.lock().unwrap().is_none());
     }
 
     #[test]

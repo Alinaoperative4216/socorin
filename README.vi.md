@@ -234,7 +234,9 @@ Có hai công cụ hỗ trợ để chạy tự động toàn bộ luồng:
 - **Ghi hình trên Windows / Linux** dùng `ffmpeg`. App tìm nó ở các vị trí cài
   đặt thông dụng rồi tới các mục tuyệt đối trong `PATH` (không bao giờ dùng thư
   mục làm việc); *Settings → Recording* cho phép nhập đường dẫn cụ thể nếu nó
-  nằm chỗ khác. macOS ghi hình bằng `screencapture` của hệ thống.
+  nằm chỗ khác (phải là chính file `ffmpeg`: thiết lập này không thể trỏ trình
+  ghi hình sang chương trình khác). macOS ghi hình bằng `screencapture` của hệ
+  thống.
 
 ## Đóng góp
 

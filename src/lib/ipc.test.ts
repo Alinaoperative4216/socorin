@@ -65,15 +65,19 @@ describe("ipc", () => {
     expect(tauri.invoke).toHaveBeenNthCalledWith(3, "save_png_as", png, undefined);
   });
 
-  it("passes the target path of save_png percent-encoded in a header", async () => {
+  it("save_png returns the auto-named path and never sends one", async () => {
     tauri.handlers.save_png = () => "/out/a.png";
     const png = new Uint8Array([9]);
     expect(await ipc.savePng(png)).toBe("/out/a.png");
-    expect(tauri.invoke).toHaveBeenLastCalledWith("save_png", png, { headers: {} });
-    await ipc.savePng(png, "/Users/me/Ảnh/my shot.png");
-    expect(tauri.invoke).toHaveBeenLastCalledWith("save_png", png, {
-      headers: { "x-path": encodeURIComponent("/Users/me/Ảnh/my shot.png") },
-    });
+    expect(tauri.invoke).toHaveBeenLastCalledWith("save_png", png, undefined);
+  });
+
+  it("save_png_as resolves to the chosen path or null", async () => {
+    const png = new Uint8Array([9]);
+    tauri.handlers.save_png_as = () => "/Users/me/Ảnh/my shot.png";
+    expect(await ipc.savePngAs(png)).toBe("/Users/me/Ảnh/my shot.png");
+    tauri.handlers.save_png_as = () => null;
+    expect(await ipc.savePngAs(png)).toBeNull();
   });
 
   it("propagates command errors", async () => {
