@@ -25,7 +25,28 @@ let settings = {
   updateCheckedAt: Math.floor(Date.now() / 1000) - 3600,
   updateAvailable: "1.0.9",
   lastVersion: "1.0.2",
+  uploadServer: "https://socorin.com",
+  installId: "mockInstallId0123456789",
 };
+
+// `?mock=share&state=failed` shows the popover's failure look.
+let mockLinks = [
+  {
+    id: "med-0123456789abcdefgh",
+    shareUrl: "https://socorin.com/s/med-0123456789abcdefgh",
+    expiresAt: new Date(Date.now() + 60 * 86_400_000).toISOString(),
+    kind: "image",
+    mime: "image/png",
+    size: 123_456,
+    createdAt: Math.floor(Date.now() / 1000) - 120,
+  },
+];
+function mockShareNotice() {
+  const state = new URLSearchParams(location.search).get("state");
+  return state === "failed"
+    ? { kind: "failed", error: { code: "file_too_large", message: "This capture is 7.3 MB; the share limit is 5 MB.", maxBytes: 5_242_880 } }
+    : { kind: "shared", link: mockLinks[0], retentionDays: 60 };
+}
 
 // `?mock=update&state=installing|failed|updated` shows the popover's other looks.
 function mockUpdateStatus() {
@@ -154,7 +175,25 @@ const handlers: Record<string, Handler> = {
   stop_recording: async () => console.log("[mock] stop_recording"),
   stop_recording_copy: async () => console.log("[mock] stop_recording_copy"),
   cancel_recording: async () => console.log("[mock] cancel_recording"),
+  stop_recording_upload: async () => console.log("[mock] stop_recording_upload"),
   recording_status: async () => ({ recording: true, startedMs: Date.now() - 65_000, path: "/Users/mock/Pictures/Screenshots/Screenshot.mov" }),
+  upload_png: async (args) => {
+    console.log("[mock] upload_png", (args as ArrayBuffer).byteLength, "bytes");
+    await new Promise((r) => setTimeout(r, 1200));
+    return { ...mockLinks[0], deleteToken: "del-mock" };
+  },
+  share_history: async () => mockLinks,
+  delete_share: async (args) => {
+    mockLinks = mockLinks.filter((l) => l.id !== (args as { id: string }).id);
+  },
+  copy_share_link: async (args) => console.log("[mock] copy_share_link", (args as { id: string }).id),
+  reset_install_id: async () => {
+    settings = { ...settings, installId: "" };
+    return settings;
+  },
+  share_notice: async () => mockShareNotice(),
+  share_ready: async () => undefined,
+  dismiss_share: async () => console.log("[mock] dismiss_share"),
   default_save_dir: async () => "/Users/mock/Pictures/Screenshots",
   save_png: async (args) => {
     const bytes = args instanceof Uint8Array ? args.byteLength : (args as ArrayBuffer).byteLength;

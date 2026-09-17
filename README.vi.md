@@ -31,14 +31,29 @@ phiên bản mới ở đó mỗi ngày một lần.
   dày nét có sẵn; undo/redo; zoom.
 - Sao chép vào clipboard, lưu nhanh vào thư mục với tên theo thời gian, hoặc
   Save as.
-- Chế độ "sau khi chụp": mở editor, sao chép ngay, hoặc lưu ngay.
+- *Upload & copy link*: một cú bấm (hoặc `Ctrl/⌘+Shift+U`) trên thanh công cụ
+  chú thích sẽ tải ảnh (đã kèm chú thích) lên socorin.com và đưa link chia sẻ
+  vào clipboard, kèm một thông báo nhỏ ngay dưới icon trên menu bar / khay
+  (Copy again / Delete from server). File được giữ 60 ngày, tối đa 5 MB.
+  *Settings → Share* liệt kê các link đã tạo, mỗi link có *Copy* và
+  *Delete*, và cho phép đổi sang server upload khác (server tự dựng, hoặc
+  `http://localhost:3000` khi phát triển).
+- Chế độ "sau khi chụp": mở editor, sao chép ngay, lưu ngay, hoặc tải lên và
+  sao chép link ngay.
 - Ghi hình một vùng hoặc toàn màn hình (menu khay, phím tắt, dòng lệnh).
   Ghi một vùng: thanh điều khiển nổi nằm đúng chỗ thanh Record / Cancel trước
   đó, hiện thời gian đã ghi cùng *Stop & copy* (video được đưa vào clipboard
-  dưới dạng file, dán thẳng vào chat), *Stop* (mở thư mục chứa file) và
-  *Cancel* (bỏ bản ghi). Ghi toàn màn hình không hiện thanh nào: icon trên
-  khay chuyển sang màu đỏ kèm thời gian đã ghi, menu của nó có đúng ba thao
-  tác trên. macOS ghi bằng `screencapture`, Windows / Linux bằng `ffmpeg`.
+  dưới dạng file, dán thẳng vào chat), *Stop & upload* (video được tải lên
+  socorin.com và link vào clipboard, cùng giới hạn như ảnh), *Stop* (mở thư
+  mục chứa file) và *Cancel* (bỏ bản ghi). Ghi toàn màn hình không hiện
+  thanh nào: icon trên khay chuyển sang màu đỏ kèm thời gian đã ghi, menu
+  của nó có đúng bốn thao tác trên. macOS ghi bằng `screencapture`, Windows
+  bằng bộ ghi tích hợp (Windows Graphics Capture + Media Foundation, không
+  cần cài thêm gì), Linux bằng `ffmpeg`. macOS ghi ra file QuickTime `.mov`
+  mà server chia sẻ không nhận: nếu máy có `ffmpeg` (`brew install ffmpeg`,
+  hoặc chỉ đường dẫn trong *Settings → Recording*) thì *Stop & upload* sẽ
+  chuyển sang `.mp4` trước (không mã hoá lại); không có thì app giữ nguyên
+  file `.mov` và báo rõ.
 - Khởi động cùng máy (bật sẵn; tắt trong Settings nếu không muốn), chỉ chạy
   một phiên bản, cửa sổ cài đặt ẩn trong khay.
 - Kiểm tra phiên bản mới mỗi ngày một lần qua
@@ -56,6 +71,19 @@ phiên bản mới ở đó mỗi ngày một lần.
   Các cờ chụp và ghi hình bị bỏ qua cho tới khi bật *Allow command-line
   triggers* trong Settings (nếu không, bất kỳ chương trình nào trên máy cũng có
   thể mượn app này, vốn đã có quyền ghi màn hình, để chụp hộ).
+
+## Quyền riêng tư
+
+Không có gì rời khỏi máy nếu bạn không yêu cầu. Ảnh chụp và video nằm trên
+đĩa và trong clipboard của bạn; app chỉ ra mạng khi kiểm tra phiên bản mỗi
+ngày (một lệnh `GET` tới `version.json`, tắt được) và khi chính bạn bấm
+*Upload & copy link*, *Stop & upload* hoặc chọn chế độ *upload* sau khi
+chụp. Mỗi lần tải lên gửi file, loại và kích thước file, checksum, phiên bản
+và hệ điều hành của app tới server ghi trong *Settings → Share*, kèm một
+install ID ngẫu nhiên do server cấp ở lần đầu để chống spam: không có tài
+khoản, và *Reset install ID* sẽ bỏ ID đó. Mỗi link đi kèm một delete token
+được app giữ cục bộ, nên bạn có thể gỡ file khỏi server từ thông báo hoặc
+từ *Settings → Share* trước khi nó hết hạn.
 
 ## Phát triển
 

@@ -15,6 +15,11 @@ describe("RecordControls", () => {
     const onCancel = vi.fn();
     const { container } = render(<RecordControls phase="ready" elapsedMs={0} onRecord={onRecord} onCancel={onCancel} />);
     expect(screen.getByText("Adjust the area, then")).toBeTruthy();
+    // The logo leads the bar in every phase, before the hint / clock.
+    const logo = container.querySelector(".toolbar-row")!.firstElementChild as HTMLImageElement;
+    expect(logo.className).toBe("toolbar-logo");
+    expect(logo.getAttribute("alt")).toBe("");
+    expect(logo.draggable).toBe(false);
     fireEvent.click(screen.getByTitle("Start recording (Enter)"));
     fireEvent.click(screen.getByTitle("Cancel (Esc)"));
     expect(onRecord).toHaveBeenCalledTimes(1);
@@ -24,21 +29,27 @@ describe("RecordControls", () => {
     expect(fireEvent.mouseDown(container.querySelector(".record-bar")!)).toBe(false);
   });
 
-  it("shows the clock with Stop & copy / Stop / Cancel while recording", () => {
+  it("shows the clock with Stop & copy / Stop & upload / Stop / Cancel while recording", () => {
     const onStop = vi.fn();
     const onStopCopy = vi.fn();
+    const onStopUpload = vi.fn();
     const onCancel = vi.fn();
     const { container, rerender } = render(
-      <RecordControls phase="recording" elapsedMs={65_000} onStop={onStop} onStopCopy={onStopCopy} onCancel={onCancel} />,
+      <RecordControls phase="recording" elapsedMs={65_000} onStop={onStop} onStopCopy={onStopCopy} onStopUpload={onStopUpload} onCancel={onCancel} />,
     );
     expect(screen.getByText("01:05")).toBeTruthy();
+    expect(container.querySelector(".toolbar-row")!.firstElementChild!.className).toBe("toolbar-logo");
     expect(container.querySelector(".rec-dot")?.className).toContain("live");
     fireEvent.click(screen.getByTitle("Stop and copy the video to the clipboard"));
+    fireEvent.click(screen.getByTitle("Stop and upload the video, copying its link"));
     fireEvent.click(screen.getByTitle("Stop recording"));
     fireEvent.click(screen.getByTitle("Discard the recording"));
     expect(onStopCopy).toHaveBeenCalledTimes(1);
+    expect(onStopUpload).toHaveBeenCalledTimes(1);
     expect(onStop).toHaveBeenCalledTimes(1);
     expect(onCancel).toHaveBeenCalledTimes(1);
+    const labels = screen.getAllByRole("button").map((b) => b.textContent?.trim());
+    expect(labels).toEqual(["Stop & copy", "Stop & upload", "Stop", "Cancel"]);
 
     // Before the encoder is up the dot does not pulse yet; while stopping
     // the buttons are disabled; after Stop & copy the bar says so.
@@ -50,5 +61,13 @@ describe("RecordControls", () => {
     expect(onStop).toHaveBeenCalledTimes(1);
     rerender(<RecordControls phase="copied" elapsedMs={0} />);
     expect(screen.getByText("Copied to clipboard")).toBeTruthy();
+    // Stop & upload: "Uploading…" with the buttons off, then "Link copied".
+    rerender(<RecordControls phase="uploading" elapsedMs={0} onStopUpload={onStopUpload} />);
+    expect(screen.getByText("Uploading…")).toBeTruthy();
+    expect(container.querySelector(".rec-busy")).toBeTruthy();
+    expect((screen.getByTitle("Stop and upload the video, copying its link") as HTMLButtonElement).disabled).toBe(true);
+    rerender(<RecordControls phase="shared" elapsedMs={0} />);
+    expect(screen.getByText("Link copied")).toBeTruthy();
+    expect((screen.getByTitle("Stop recording") as HTMLButtonElement).disabled).toBe(true);
   });
 });

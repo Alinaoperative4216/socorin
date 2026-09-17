@@ -45,6 +45,16 @@ describe("Recorder bar", () => {
     expect(screen.getByText("00:00")).toBeTruthy();
     act(() => tauri.emit("recording:stopped", { copied: false }));
     expect(screen.getByText("00:00")).toBeTruthy();
+
+    // Stop & upload: "Uploading…" while Rust sends the file, then the link.
+    act(() => tauri.emit("recording:started", { recording: true, startedMs: Date.now(), path: "/tmp/d.mp4" }));
+    act(() => tauri.emit("recording:uploading"));
+    expect(screen.getByText("Uploading…")).toBeTruthy();
+    act(() => tauri.emit("recording:stopped", { copied: false, link: "https://socorin.com/s/x" }));
+    expect(screen.getByText("Link copied")).toBeTruthy();
+    // A failed upload ends like a plain stop (the popover explains).
+    act(() => tauri.emit("recording:stopped", { copied: false, link: null }));
+    expect(screen.getByText("00:00")).toBeTruthy();
   });
 
   it("stops, copies or discards through the buttons and survives a failed status query", async () => {
@@ -61,6 +71,10 @@ describe("Recorder bar", () => {
     act(() => tauri.emit("recording:started", { recording: true, startedMs: Date.now(), path: "/tmp/c.mov" }));
     fireEvent.click(screen.getByTitle("Discard the recording"));
     expect(tauri.calls("cancel_recording")).toHaveLength(1);
+    act(() => tauri.emit("recording:started", { recording: true, startedMs: Date.now(), path: "/tmp/c.mov" }));
+    fireEvent.click(screen.getByTitle("Stop and upload the video, copying its link"));
+    expect(tauri.calls("stop_recording_upload")).toHaveLength(1);
+    expect((screen.getByTitle("Stop recording") as HTMLButtonElement).disabled).toBe(true);
   });
 
   it("re-enables the buttons when the stop command fails", async () => {

@@ -10,6 +10,7 @@ const Settings = lazy(() => import("./windows/Settings").then((m) => ({ default:
 const Welcome = lazy(() => import("./windows/Welcome").then((m) => ({ default: m.Welcome })));
 const Recorder = lazy(() => import("./windows/Recorder").then((m) => ({ default: m.Recorder })));
 const UpdateNotice = lazy(() => import("./windows/UpdateNotice").then((m) => ({ default: m.UpdateNotice })));
+const ShareNotice = lazy(() => import("./windows/ShareNotice").then((m) => ({ default: m.ShareNotice })));
 
 const OVERLAY_PREFIX = "overlay-";
 
@@ -44,6 +45,13 @@ function Root({ label }: { label: string }) {
     return (
       <Suspense fallback={null}>
         <UpdateNotice />
+      </Suspense>
+    );
+  }
+  if (kind === "share") {
+    return (
+      <Suspense fallback={null}>
+        <ShareNotice />
       </Suspense>
     );
   }

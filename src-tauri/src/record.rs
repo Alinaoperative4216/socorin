@@ -13,9 +13,10 @@
 //! which is hidden before the encoder starts so it is never in the video.
 //! While a region records, the Record / Cancel bar the overlay showed is
 //! replaced, at the very same spot, by the `recorder` window (elapsed time,
-//! Stop & copy, Stop, Cancel); a full-screen recording shows no bar at all
-//! and is driven from the (red) tray icon's menu. Stopping finalises the
-//! file and reveals it, copies it to the clipboard, or discards it.
+//! Stop & copy, Stop & upload, Stop, Cancel); a full-screen recording shows
+//! no bar at all and is driven from the (red) tray icon's menu. Stopping
+//! finalises the file and reveals it, copies it to the clipboard, uploads
+//! it to the share server (`share`), or discards it.
 
 use std::{
     path::{Path, PathBuf},
@@ -32,7 +33,7 @@ use tauri::{AppHandle, Emitter, Manager, Runtime};
 
 use crate::{
     capture::{self, MonitorGeom},
-    clipboard, debug, settings, tray, windows,
+    clipboard, debug, settings, share, tray, windows,
 };
 #[cfg(windows)]
 use crate::wgc;
@@ -113,6 +114,9 @@ pub enum Outcome {
     Reveal,
     /// Keep it and put the file on the clipboard, ready to paste into a chat.
     Copy,
+    /// Keep it, upload it to the share server and put the link on the
+    /// clipboard (see `upload_recording`).
+    Upload,
     /// Delete it.
     Discard,
 }
@@ -122,6 +126,8 @@ pub enum Outcome {
 #[serde(rename_all = "camelCase")]
 pub struct Stopped {
     pub copied: bool,
+    /// The share link, after Stop & upload.
+    pub link: Option<String>,
 }
 
 pub(crate) struct Active {
@@ -332,7 +338,7 @@ fn start_inner<R: Runtime>(app: &AppHandle<R>, area: Area, bar: Option<Bar>) -> 
 /// down again.
 fn finish_abort<R: Runtime>(app: &AppHandle<R>) {
     windows::hide_recorder(app);
-    let _ = app.emit("recording:stopped", Stopped { copied: false });
+    let _ = app.emit("recording:stopped", Stopped { copied: false, link: None });
 }
 
 pub fn stop_async<R: Runtime>(app: AppHandle<R>) {
@@ -368,7 +374,7 @@ pub fn stop_with<R: Runtime>(app: &AppHandle<R>, outcome: Outcome) -> Result<Opt
         return Err("not recording".into());
     };
     tray::set_recording(app, false);
-    if outcome != Outcome::Copy {
+    if !matches!(outcome, Outcome::Copy | Outcome::Upload) {
         windows::hide_recorder(app);
     }
 
@@ -385,7 +391,7 @@ pub fn stop_with<R: Runtime>(app: &AppHandle<R>, outcome: Outcome) -> Result<Opt
     if outcome == Outcome::Discard {
         let _ = std::fs::remove_file(&path);
         debug::log(format!("discarded {} after {:?}", path.display(), started.elapsed()));
-        let _ = app.emit("recording:stopped", Stopped { copied: false });
+        let _ = app.emit("recording:stopped", Stopped { copied: false, link: None });
         return Ok(None);
     }
     // Only a regular file at that name counts (a symlink planted there is
@@ -398,7 +404,7 @@ pub fn stop_with<R: Runtime>(app: &AppHandle<R>, outcome: Outcome) -> Result<Opt
     if size == 0 {
         let _ = std::fs::remove_file(&path);
         windows::hide_recorder(app);
-        let _ = app.emit("recording:stopped", Stopped { copied: false });
+        let _ = app.emit("recording:stopped", Stopped { copied: false, link: None });
         return Err(match finished {
             Err(e) => format!("recording failed: {e}"),
             Ok(()) => "recording failed: no video was written (is screen recording allowed?)".into(),
@@ -422,16 +428,123 @@ pub fn stop_with<R: Runtime>(app: &AppHandle<R>, outcome: Outcome) -> Result<Opt
     } else {
         false
     };
-    if copied {
-        // The bar says "Copied" for a moment before it goes.
-        windows::hide_recorder_later(app, Duration::from_millis(1500));
+    // Stop & upload: the bar says "Uploading…" meanwhile; the popover
+    // reports the link or the failure. A file that cannot go (too large,
+    // not convertible) is kept and revealed like a plain Stop.
+    let (path, link) = if outcome == Outcome::Upload {
+        let _ = app.emit("recording:uploading", ());
+        let (path, outcome) = upload_recording(app, path);
+        let link = share::announce(app, outcome).ok().map(|r| r.share_url);
+        (path, link)
+    } else {
+        (path, None)
+    };
+    if copied || link.is_some() {
+        // The bar says "Copied" / "Link copied" for a moment before it goes.
+        windows::hide_recorder_later(app, Duration::from_millis(if copied { 1500 } else { 2500 }));
     } else {
         windows::hide_recorder(app);
         let _ = tauri_plugin_opener::reveal_item_in_dir(&path);
     }
-    let _ = app.emit("recording:stopped", Stopped { copied });
+    let _ = app.emit("recording:stopped", Stopped { copied, link });
     let _ = app.emit("capture-done", path.to_string_lossy().into_owned());
     Ok(Some(path))
+}
+
+/// Upload a finished recording: converted to MP4 first when it is a
+/// QuickTime file (what macOS writes), checked against the server's limits
+/// before it is read into memory, then sent like a screenshot. Returns the
+/// file that is on disk afterwards (the `.mp4` after a conversion) and the
+/// link, or why there is none.
+fn upload_recording<R: Runtime>(app: &AppHandle<R>, path: PathBuf) -> (PathBuf, Result<share::SharedLink, share::ShareError>) {
+    let path = match uploadable_video(app, path) {
+        Ok(path) => path,
+        Err((path, e)) => return (path, Err(e)),
+    };
+    let Some(mime) = share::video_mime(&path) else {
+        return (path.clone(), Err(share::ShareError::new("unsupported_type", MOV_HELP)));
+    };
+    let name = path.file_name().map(|n| n.to_string_lossy().into_owned());
+    let result = tauri::async_runtime::block_on(async {
+        let limits = share::limits(app).await?;
+        let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+        share::check(&limits, mime, size, &settings::current(app).upload_server)?;
+        let bytes = std::fs::read(&path).map_err(|e| share::ShareError::new("io", format!("cannot read {}: {e}", path.display())))?;
+        share::upload(app, bytes, share::Kind::Video, mime, name).await
+    });
+    (path, result)
+}
+
+/// Said when a `.mov` cannot be converted.
+const MOV_HELP: &str = "macOS records QuickTime .mov files and the share server accepts MP4 or WebM only. Install ffmpeg (brew install ffmpeg) or name it under Settings → Recording, and Socorin converts recordings to MP4 before uploading.";
+
+/// The file the share server accepts: an MP4 or WebM as it is; a `.mov`
+/// remuxed into an `.mp4` (no re-encoding) when an ffmpeg is at hand, else
+/// refused with an explanation. Anything else is refused outright. On
+/// failure the path handed back is the file still on disk.
+pub(crate) fn uploadable_video<R: Runtime>(app: &AppHandle<R>, path: PathBuf) -> Result<PathBuf, (PathBuf, share::ShareError)> {
+    if share::video_mime(&path).is_some() {
+        return Ok(path);
+    }
+    let is_mov = path.extension().map_or(false, |e| e.eq_ignore_ascii_case("mov"));
+    if !is_mov {
+        let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        return Err((path, share::ShareError::new("unsupported_type", format!("{name} is not an MP4 or WebM file, which is what the share server accepts."))));
+    }
+    let ffmpeg = match ffmpeg_binary(app) {
+        Ok(ffmpeg) => ffmpeg,
+        Err(e) => {
+            eprintln!("[record] {e}");
+            return Err((path, share::ShareError::new("unsupported_type", MOV_HELP)));
+        }
+    };
+    match remux_to_mp4(&ffmpeg, &path) {
+        Ok(mp4) => Ok(mp4),
+        Err(e) => Err((path, share::ShareError::new("convert", e))),
+    }
+}
+
+/// `ffmpeg -c copy`: the H.264 stream goes into an MP4 container as it is
+/// (no re-encoding, well under a second for a short clip). The `.mov` is
+/// replaced by the `.mp4`; a name that is taken gets `_2`, `_3`, ….
+pub(crate) fn remux_to_mp4(ffmpeg: &Path, source: &Path) -> Result<PathBuf, String> {
+    let target = mp4_sibling(source);
+    let status = Command::new(ffmpeg)
+        .args(["-hide_banner", "-loglevel", "error", "-y", "-i"])
+        .arg(source)
+        .args(["-c", "copy", "-movflags", "+faststart"])
+        .arg(&target)
+        .stdin(Stdio::null())
+        .stdout(quiet())
+        .stderr(quiet())
+        .status()
+        .map_err(|e| format!("cannot start {}: {e}", ffmpeg.display()))?;
+    let written = status.success() && std::fs::metadata(&target).map(|m| m.is_file() && m.len() > 0).unwrap_or(false);
+    if !written {
+        let _ = std::fs::remove_file(&target);
+        return Err(format!("{} could not convert {} to MP4.", ffmpeg.display(), source.display()));
+    }
+    debug::log(format!("converted {} -> {}", source.display(), target.display()));
+    let _ = std::fs::remove_file(source);
+    Ok(target)
+}
+
+/// `name.mp4` next to `name.mov`, or `name_2.mp4`… when that exists.
+fn mp4_sibling(source: &Path) -> PathBuf {
+    let stem = source
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "recording".into());
+    let dir = source.parent().unwrap_or(Path::new("."));
+    let mut n = 1;
+    loop {
+        let name = if n == 1 { format!("{stem}.mp4") } else { format!("{stem}_{n}.mp4") };
+        let candidate = dir.join(name);
+        if !candidate.exists() {
+            return candidate;
+        }
+        n += 1;
+    }
 }
 
 /// Stop synchronously if a recording runs (used right before quitting, so
@@ -458,10 +571,10 @@ fn output_path<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf, String> {
 }
 
 /// The ffmpeg the user entered under Settings → Recording. The recorder
-/// runs whatever this names, so it has to be an absolute path to an
-/// existing file called `ffmpeg` (or `ffmpeg.exe`): the setting cannot
-/// point the recorder at some other program.
-#[cfg_attr(target_os = "macos", allow(dead_code))]
+/// (and, on macOS, the MP4 conversion before an upload) runs whatever this
+/// names, so it has to be an absolute path to an existing file called
+/// `ffmpeg` (or `ffmpeg.exe`): the setting cannot point the app at some
+/// other program.
 pub(crate) fn configured_ffmpeg(configured: &str) -> Result<PathBuf, String> {
     let path = PathBuf::from(configured);
     let stem_is_ffmpeg = path
@@ -508,8 +621,9 @@ fn spawn_backend<R: Runtime>(_app: &AppHandle<R>, area: &Area, path: &Path) -> R
 /// The ffmpeg binary to run. The setting wins when it is filled in; otherwise
 /// the usual install locations are tried, then the directories on PATH. The
 /// result is always an absolute path: a bare name would let a relative PATH
-/// entry (or, on Windows, the working directory) supply an impostor.
-#[cfg(not(target_os = "macos"))]
+/// entry (or, on Windows, the working directory) supply an impostor. On
+/// macOS ffmpeg only converts recordings for uploading (Homebrew's
+/// locations are looked at); the recorder itself is `screencapture`.
 fn ffmpeg_binary<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf, String> {
     let configured = settings::current(app).ffmpeg_path;
     if !configured.is_empty() {
@@ -533,6 +647,10 @@ fn ffmpeg_binary<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf, String> {
     }
     #[cfg(target_os = "linux")]
     for dir in ["/usr/bin", "/usr/local/bin", "/snap/bin", "/var/lib/flatpak/exports/bin"] {
+        candidates.push(PathBuf::from(dir).join(exe));
+    }
+    #[cfg(target_os = "macos")]
+    for dir in ["/opt/homebrew/bin", "/usr/local/bin", "/opt/local/bin"] {
         candidates.push(PathBuf::from(dir).join(exe));
     }
     if let Some(path) = std::env::var_os("PATH") {
@@ -870,6 +988,127 @@ mod tests {
         assert!(err.contains("not found"), "relative names are not searched: {err}");
         let err = configured_ffmpeg(dir.join("ffmpeg-dir").to_str().unwrap()).unwrap_err();
         assert!(err.contains("not an ffmpeg"), "{err}");
+    }
+
+    /// A stand-in for ffmpeg: a shell script that copies its input (`-i X`)
+    /// to its last argument, or fails.
+    #[cfg(unix)]
+    fn fake_ffmpeg(dir: &Path, succeed: bool) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.join("ffmpeg");
+        let body = if succeed {
+            "#!/bin/sh\nsrc=\"$6\"\neval \"dst=\\${$#}\"\ncp \"$src\" \"$dst\"\n"
+        } else {
+            "#!/bin/sh\nexit 1\n"
+        };
+        std::fs::write(&path, body).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+
+    #[test]
+    fn mp4_names_sit_next_to_the_mov_and_never_replace_a_file() {
+        let dir = temp_dir("record-mp4-name");
+        let mov = dir.join("Socorin_2026.mov");
+        assert_eq!(mp4_sibling(&mov), dir.join("Socorin_2026.mp4"));
+        std::fs::write(dir.join("Socorin_2026.mp4"), b"taken").unwrap();
+        assert_eq!(mp4_sibling(&mov), dir.join("Socorin_2026_2.mp4"));
+        std::fs::write(dir.join("Socorin_2026_2.mp4"), b"taken").unwrap();
+        assert_eq!(mp4_sibling(&mov), dir.join("Socorin_2026_3.mp4"));
+        assert!(mp4_sibling(Path::new("bare")).ends_with("bare.mp4"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_mov_is_remuxed_with_ffmpeg_and_replaced_by_the_mp4() {
+        let dir = temp_dir("record-remux");
+        let mov = dir.join("clip.mov");
+        std::fs::write(&mov, b"quicktime bytes").unwrap();
+        let ffmpeg = fake_ffmpeg(&dir, true);
+        let mp4 = remux_to_mp4(&ffmpeg, &mov).unwrap();
+        assert_eq!(mp4, dir.join("clip.mp4"));
+        assert_eq!(std::fs::read(&mp4).unwrap(), b"quicktime bytes");
+        assert!(!mov.exists(), "the .mov is replaced");
+
+        // ffmpeg fails: the .mov stays, nothing else is left behind.
+        std::fs::write(&mov, b"again").unwrap();
+        let broken = fake_ffmpeg(&temp_dir("record-remux-broken"), false);
+        let err = remux_to_mp4(&broken, &mov).unwrap_err();
+        assert!(err.contains("could not convert"), "{err}");
+        assert!(mov.exists());
+        assert!(!dir.join("clip_2.mp4").exists());
+        let err = remux_to_mp4(Path::new("/nonexistent/ffmpeg"), &mov).unwrap_err();
+        assert!(err.contains("cannot start"), "{err}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn only_mp4_and_webm_go_up_a_mov_is_converted_first() {
+        let dir = temp_dir("record-uploadable");
+        let app = app_with(settings_in(&dir));
+        let mp4 = dir.join("a.mp4");
+        assert_eq!(uploadable_video(&app, mp4.clone()).unwrap(), mp4);
+        let webm = dir.join("a.webm");
+        assert_eq!(uploadable_video(&app, webm.clone()).unwrap(), webm);
+        let avi = dir.join("a.avi");
+        let (back, e) = uploadable_video(&app, avi.clone()).unwrap_err();
+        assert_eq!((back, e.code.as_str()), (avi, "unsupported_type"));
+        assert!(e.message.contains("a.avi is not an MP4"), "{}", e.message);
+
+        // A .mov without a usable ffmpeg: refused with the explanation.
+        let mov = dir.join("a.mov");
+        std::fs::write(&mov, b"qt").unwrap();
+        app.state::<crate::settings::SettingsState>().0.lock().unwrap().ffmpeg_path = "/nonexistent/ffmpeg".into();
+        let (back, e) = uploadable_video(&app, mov.clone()).unwrap_err();
+        assert_eq!((back.clone(), e.code.as_str()), (mov.clone(), "unsupported_type"));
+        assert!(e.message.contains("brew install ffmpeg"), "{}", e.message);
+        assert!(mov.exists());
+
+        // With one: converted, and the .mp4 is what goes up.
+        let ffmpeg = fake_ffmpeg(&dir, true);
+        app.state::<crate::settings::SettingsState>().0.lock().unwrap().ffmpeg_path = ffmpeg.to_string_lossy().into_owned();
+        let converted = uploadable_video(&app, mov.clone()).unwrap();
+        assert_eq!(converted, dir.join("a.mp4"));
+        assert!(!mov.exists());
+
+        // One that fails: the .mov stays and the failure is named.
+        std::fs::write(&mov, b"qt").unwrap();
+        let broken = fake_ffmpeg(&temp_dir("record-uploadable-broken"), false);
+        app.state::<crate::settings::SettingsState>().0.lock().unwrap().ffmpeg_path = broken.to_string_lossy().into_owned();
+        let (back, e) = uploadable_video(&app, mov.clone()).unwrap_err();
+        assert_eq!((back, e.code.as_str()), (mov, "convert"));
+    }
+
+    /// Stop & upload on a finished `.mp4`: the file goes to the (local)
+    /// share server, the link is copied and announced, the file stays and
+    /// is not revealed (the bar shows "Link copied" for a moment instead).
+    #[test]
+    fn stop_and_upload_sends_the_recording_and_copies_the_link() {
+        let dir = temp_dir("record-upload");
+        let fake = share::tests::Fake::new(64, 1_000_000);
+        let base = share::tests::serve_fake(&fake);
+        let app = app_with(crate::settings::Settings { upload_server: base, ..settings_in(&dir) });
+        share::reset(&app);
+        let path = dir.join("clip.mp4");
+        std::fs::write(&path, vec![7u8; 200]).unwrap();
+        recording(&app, path.clone());
+
+        assert_eq!(stop_with(&app, Outcome::Upload).unwrap(), Some(path.clone()));
+        assert!(!is_recording(&app));
+        assert!(path.exists(), "the recording stays on disk");
+        let Some(share::Notice::Shared { link, .. }) = share::notice(&app) else { panic!("{:?}", share::notice(&app)) };
+        assert_eq!(link.share_url, "https://socorin.com/s/med-0123456789abcdefgh");
+        assert_eq!(app.state::<share::ShareState>().copied.lock().unwrap().as_slice(), &[link.share_url.clone()]);
+        let init = &fake.requests("POST", "/api/upload/init")[0];
+        let body: serde_json::Value = serde_json::from_slice(&init.body).unwrap();
+        assert_eq!(body["kind"], "video");
+        assert_eq!(body["mime"], "video/mp4");
+        assert_eq!(body["size"], 200);
+        assert_eq!(body["filename"], "clip.mp4");
+        assert_eq!(fake.requests("PUT", "/api/upload/").len(), 4, "200 bytes in chunks of 64");
+        assert_eq!(share::history(&app).len(), 1);
+        share::dismiss(&app);
+        std::thread::sleep(Duration::from_millis(30));
     }
 
     #[test]

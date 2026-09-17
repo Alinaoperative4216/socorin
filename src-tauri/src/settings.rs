@@ -14,6 +14,8 @@ pub enum AfterCapture {
     Clipboard,
     /// Save straight to the save directory.
     Save,
+    /// Upload to the share server and put the link on the clipboard.
+    Upload,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -65,6 +67,13 @@ pub struct Settings {
     /// Version that ran last time; a different one now means an update was
     /// installed since (the popover says so once).
     pub last_version: String,
+    /// Where "Upload & copy link" sends captures (`share.rs`): an http(s)
+    /// origin without a trailing slash, socorin.com by default.
+    pub upload_server: String,
+    /// The random id the share server gave this install (its spam control;
+    /// there are no accounts). Empty until the first upload registers one;
+    /// "Reset install ID" in Settings empties it again.
+    pub install_id: String,
 }
 
 impl Default for Settings {
@@ -88,6 +97,8 @@ impl Default for Settings {
             update_checked_at: 0,
             update_available: String::new(),
             last_version: String::new(),
+            upload_server: DEFAULT_UPLOAD_SERVER.into(),
+            install_id: String::new(),
         }
     }
 }
@@ -98,8 +109,48 @@ pub const DEFAULT_COLOR: &str = "#ff3b30";
 pub const DEFAULT_STROKE: u8 = 3;
 pub const MAX_STROKE: u8 = 5;
 pub const DEFAULT_PREFIX: &str = "Socorin";
+pub const DEFAULT_UPLOAD_SERVER: &str = "https://socorin.com";
 /// Leaves room for the time stamp and extension on every file system.
 const MAX_PREFIX_LEN: usize = 64;
+
+/// The share server as an origin: `http://` or `https://` with a host, an
+/// optional port and no path, query or trailing slash (the API paths are
+/// appended to it). Anything else, and an empty field, means socorin.com.
+pub fn sanitise_server(raw: &str) -> String {
+    let trimmed = raw.trim().trim_end_matches('/');
+    let Ok(url) = url::Url::parse(trimmed) else {
+        return DEFAULT_UPLOAD_SERVER.into();
+    };
+    let plain = matches!(url.scheme(), "http" | "https")
+        && url.host_str().map_or(false, |h| !h.is_empty())
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.query().is_none()
+        && url.fragment().is_none()
+        && matches!(url.path(), "" | "/");
+    if !plain {
+        return DEFAULT_UPLOAD_SERVER.into();
+    }
+    // `Url` lower-cases the scheme and host; the port stays when it is not
+    // the scheme's default.
+    let mut origin = format!("{}://{}", url.scheme(), url.host_str().unwrap_or_default());
+    if let Some(port) = url.port() {
+        origin.push_str(&format!(":{port}"));
+    }
+    origin
+}
+
+/// The install id is opaque to the app; only obviously broken values (spaces,
+/// control characters, absurd length) are dropped so a corrupt settings file
+/// cannot poison every request header.
+pub fn sanitise_install_id(raw: &str) -> String {
+    let id = raw.trim();
+    if id.len() <= 64 && id.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_')) {
+        id.to_string()
+    } else {
+        String::new()
+    }
+}
 
 /// A file-name prefix must stay one plain file name inside the save folder.
 /// Path separators, the characters Windows rejects and control characters
@@ -133,13 +184,17 @@ pub fn normalise<R: Runtime>(app: &AppHandle<R>, settings: &mut Settings) {
     settings.annotation_color = if valid_color { color } else { DEFAULT_COLOR.into() };
     settings.annotation_stroke = settings.annotation_stroke.clamp(1, MAX_STROKE);
     settings.update_available = settings.update_available.trim().to_string();
+    settings.upload_server = sanitise_server(&settings.upload_server);
+    settings.install_id = sanitise_install_id(&settings.install_id);
 }
 
 fn config_file<R: Runtime>(app: &AppHandle<R>) -> Option<PathBuf> {
-    app.path()
-        .app_config_dir()
-        .ok()
-        .map(|d| d.join("settings.json"))
+    config_path(app, "settings.json")
+}
+
+/// A file next to `settings.json` in the app's config directory.
+pub(crate) fn config_path<R: Runtime>(app: &AppHandle<R>, name: &str) -> Option<PathBuf> {
+    app.path().app_config_dir().ok().map(|d| d.join(name))
 }
 
 pub fn default_save_dir<R: Runtime>(app: &AppHandle<R>) -> PathBuf {
@@ -181,7 +236,7 @@ pub fn save<R: Runtime>(app: &AppHandle<R>, settings: &Settings) -> Result<(), S
     write_atomically(&path, json.as_bytes())
 }
 
-fn write_atomically(path: &std::path::Path, bytes: &[u8]) -> Result<(), String> {
+pub(crate) fn write_atomically(path: &std::path::Path, bytes: &[u8]) -> Result<(), String> {
     let dir = path.parent().ok_or("settings path has no directory")?;
     fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     let mut tmp = path.as_os_str().to_owned();
@@ -266,6 +321,44 @@ mod sanitise_tests {
     fn is_bounded() {
         assert_eq!(sanitise_prefix(&"x".repeat(500)).len(), 64);
     }
+
+    #[test]
+    fn the_share_server_is_an_http_origin_or_the_default() {
+        use super::{sanitise_server, DEFAULT_UPLOAD_SERVER};
+        assert_eq!(sanitise_server("https://socorin.com"), DEFAULT_UPLOAD_SERVER);
+        assert_eq!(sanitise_server(" https://socorin.com/ "), DEFAULT_UPLOAD_SERVER);
+        assert_eq!(sanitise_server("http://localhost:3000"), "http://localhost:3000");
+        assert_eq!(sanitise_server("http://localhost:3000///"), "http://localhost:3000");
+        assert_eq!(sanitise_server("HTTPS://Share.Example.COM:8443"), "https://share.example.com:8443");
+        assert_eq!(sanitise_server("https://example.com:443"), "https://example.com");
+        for bad in [
+            "",
+            "   ",
+            "socorin.com",
+            "ftp://socorin.com",
+            "file:///etc",
+            "https://socorin.com/api",
+            "https://socorin.com/?x=1",
+            "https://socorin.com/#frag",
+            "https://user:pw@socorin.com",
+            "https://",
+            "not a url",
+        ] {
+            assert_eq!(sanitise_server(bad), DEFAULT_UPLOAD_SERVER, "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn the_install_id_is_kept_only_when_it_looks_like_one() {
+        use super::sanitise_install_id;
+        assert_eq!(sanitise_install_id("AbC-123_xyz"), "AbC-123_xyz");
+        assert_eq!(sanitise_install_id("  AbC  "), "AbC");
+        assert_eq!(sanitise_install_id(""), "");
+        assert_eq!(sanitise_install_id("has space"), "");
+        assert_eq!(sanitise_install_id("new\nline"), "");
+        assert_eq!(sanitise_install_id(&"a".repeat(65)), "");
+        assert_eq!(sanitise_install_id("ünïcode"), "");
+    }
 }
 
 #[cfg(test)]
@@ -321,6 +414,35 @@ mod app_tests {
         let mut s = chosen;
         normalise(app.handle(), &mut s);
         assert_eq!(s.update_available, "1.2.3");
+    }
+
+    #[test]
+    fn sharing_defaults_to_socorin_com_and_no_install_id() {
+        let d = Settings::default();
+        assert_eq!(d.upload_server, DEFAULT_UPLOAD_SERVER);
+        assert_eq!(d.install_id, "");
+        let json = serde_json::to_value(&d).unwrap();
+        assert_eq!(json["uploadServer"], DEFAULT_UPLOAD_SERVER);
+        assert_eq!(json["installId"], "");
+        assert_eq!(serde_json::to_value(AfterCapture::Upload).unwrap(), "upload");
+        // A settings file from before the feature, and one with a broken
+        // server or id: normalised to something usable.
+        let old: Settings = serde_json::from_str(r#"{"hotkey":"F5"}"#).unwrap();
+        assert_eq!(old.upload_server, DEFAULT_UPLOAD_SERVER);
+        let mut s: Settings = serde_json::from_str(
+            r#"{"uploadServer":"http://localhost:3000/","installId":" abc ","afterCapture":"upload"}"#,
+        )
+        .unwrap();
+        assert_eq!(s.after_capture, AfterCapture::Upload);
+        let app = app();
+        normalise(app.handle(), &mut s);
+        assert_eq!(s.upload_server, "http://localhost:3000");
+        assert_eq!(s.install_id, "abc");
+        s.upload_server = "nope".into();
+        s.install_id = "bad id".into();
+        normalise(app.handle(), &mut s);
+        assert_eq!(s.upload_server, DEFAULT_UPLOAD_SERVER);
+        assert_eq!(s.install_id, "");
     }
 
     #[test]

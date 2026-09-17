@@ -3,6 +3,9 @@ import { Image as KImage, Layer, Stage, Transformer } from "react-konva";
 import { ShapeNode } from "./Shapes";
 import type { Annotator } from "./useAnnotator";
 
+/** The selection frame and its handles: the light end of the logo's plum, visible on dark and light pictures alike. */
+const SELECTION_COLOR = "#9366d0";
+
 export type Bitmap = HTMLImageElement | HTMLCanvasElement;
 
 interface Props {
@@ -78,9 +81,9 @@ export function AnnotationStage({ a, image, width, height, scale }: Props) {
             flipEnabled={false}
             ignoreStroke
             anchorSize={8}
-            anchorStroke="#0a84ff"
+            anchorStroke={SELECTION_COLOR}
             anchorFill="#ffffff"
-            borderStroke="#0a84ff"
+            borderStroke={SELECTION_COLOR}
             boundBoxFunc={(oldBox, newBox) => (newBox.width < 4 || newBox.height < 4 ? oldBox : newBox)}
           />
         </Layer>

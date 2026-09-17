@@ -1,6 +1,7 @@
 import {
   AppWindow,
   Circle,
+  CloudUpload,
   Copy,
   EyeOff,
   FolderDown,
@@ -22,7 +23,18 @@ import {
   ZoomOut,
 } from "lucide-react";
 import type { ComponentType, MouseEvent as ReactMouseEvent } from "react";
+import logo from "../assets/logo.svg";
 import { COLORS, STROKE_LEVELS, type ToolId } from "./types";
+
+/** The app mark at the head of a toolbar (decorative: not a button, nothing to hover). */
+export function ToolbarLogo() {
+  return (
+    <>
+      <img className="toolbar-logo" src={logo} alt="" aria-hidden="true" width={18} height={18} draggable={false} />
+      <span className="sep" />
+    </>
+  );
+}
 
 export const TOOLS: { id: ToolId; label: string; key: string; Icon: ComponentType<{ size?: number }> }[] = [
   { id: "select", label: "Select / move", key: "V", Icon: MousePointer2 },
@@ -56,6 +68,8 @@ interface Props {
   onCopy: () => void;
   onSave: () => void;
   onSaveAs: () => void;
+  /** "Upload & copy link": the PNG goes to the share server. */
+  onUpload: () => void;
   onClose: () => void;
   /** Floating variant (in-place editor): no zoom controls, tools toggle off. */
   floating?: boolean;
@@ -160,6 +174,9 @@ export function Toolbar(p: Props) {
       <button type="button" className="tool-btn wide" title="Save as… (Ctrl/⌘+Shift+S)" disabled={p.busy} onClick={p.onSaveAs}>
         <FolderDown size={16} /> Save as
       </button>
+      <button type="button" className="tool-btn wide" title="Upload & copy link (Ctrl/⌘+Shift+U)" disabled={p.busy} onClick={p.onUpload}>
+        <CloudUpload size={16} /> Upload
+      </button>
       <button
         type="button"
         className="tool-btn wide primary"
@@ -185,6 +202,7 @@ export function Toolbar(p: Props) {
     return (
       <div className="toolbar floating" onMouseDown={stopFocus}>
         <div className="toolbar-row">
+          <ToolbarLogo />
           {tools}
           <span className="sep" />
           {history}
@@ -198,6 +216,7 @@ export function Toolbar(p: Props) {
 
   return (
     <div className="toolbar" onMouseDown={stopFocus}>
+      <ToolbarLogo />
       {tools}
       <span className="sep" />
       {style}

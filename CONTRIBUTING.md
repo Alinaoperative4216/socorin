@@ -76,6 +76,13 @@ Rust
   `record::stop` on a non-empty file (opens Finder), `tray::create`,
   `quit`. Use the guarded paths instead (a busy session, an injected
   `record::Active`, an unknown monitor).
+- The share tests (`share.rs`, and `record::stop_with(Outcome::Upload)`)
+  talk to a fake server on `127.0.0.1` (`share::tests::serve` /
+  `share::tests::Fake`, which speaks the whole upload protocol) that the
+  test points the app at through `Settings::upload_server`; nothing may
+  reach socorin.com. `share::copy_text` records what it would have copied
+  in `ShareState::copied` under `cfg(test)` instead of writing the
+  clipboard.
 
 ## Pull requests
 

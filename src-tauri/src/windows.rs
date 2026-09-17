@@ -20,6 +20,7 @@ pub const MAIN: &str = "main";
 pub const WELCOME: &str = "welcome";
 pub const RECORDER: &str = "recorder";
 pub const UPDATE: &str = "update";
+pub const SHARE: &str = "share";
 
 pub fn overlay_label(monitor_id: u32) -> String {
     format!("{OVERLAY_PREFIX}{monitor_id}")
@@ -227,8 +228,9 @@ pub fn close_welcome<R: Runtime>(app: &AppHandle<R>) {
 /// draws the bar this far from the window's edges (`RECORDER_MARGIN` in
 /// `src/lib/ipc.ts` must match).
 pub const RECORDER_MARGIN: f64 = 20.0;
-/// Size the hidden window is created with; it is resized to the bar on use.
-const RECORDER_DEFAULT_SIZE: (f64, f64) = (440.0, 84.0);
+/// Size the hidden window is created with (the 600 px bar plus its margin);
+/// it is resized to the measured bar on use.
+const RECORDER_DEFAULT_SIZE: (f64, f64) = (640.0, 84.0);
 
 /// The floating recording bar (elapsed time, Stop & copy, Stop, Cancel).
 /// It is the same toolbar the overlay shows before recording, in its own
@@ -332,15 +334,44 @@ pub const UPDATE_MARGIN: f64 = 16.0;
 /// It is never focused when shown, so the user's work keeps the keyboard;
 /// once clicked, a click elsewhere hides it again (`update::blurred`).
 pub fn show_update_notice<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
+    show_popover(app, UPDATE, "Socorin update", UPDATE_SIZE)
+}
+
+/// The "Link copied" popover after an upload (`share::announce`): the same
+/// window as the update notice, under the same icon, with its own label so
+/// the two never fight over one window.
+pub fn show_share_notice<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
+    show_popover(app, SHARE, "Socorin share", SHARE_SIZE)
+}
+
+pub fn reveal_share_notice<R: Runtime>(app: &AppHandle<R>) {
+    if let Some(window) = app.get_webview_window(SHARE) {
+        let _ = window.show();
+    }
+}
+
+pub fn hide_share_notice<R: Runtime>(app: &AppHandle<R>) {
+    if let Some(window) = app.get_webview_window(SHARE) {
+        let _ = window.hide();
+    }
+}
+
+/// Logical size of the share popover (a bit taller than the update one:
+/// the link line and three buttons).
+pub const SHARE_SIZE: (f64, f64) = (392.0, 186.0);
+
+/// A popover window under the menu bar / tray icon, created hidden once and
+/// reused (see `show_update_notice` for how it is revealed).
+fn show_popover<R: Runtime>(app: &AppHandle<R>, label: &str, title: &str, size: (f64, f64)) -> Result<(), String> {
     let (x, y) = update_notice_position(app);
-    if let Some(window) = app.get_webview_window(UPDATE) {
+    if let Some(window) = app.get_webview_window(label) {
         let _ = window.set_position(LogicalPosition::new(x, y));
         let _ = window.show();
         return Ok(());
     }
-    let (w, h) = UPDATE_SIZE;
-    WebviewWindowBuilder::new(app, UPDATE, WebviewUrl::App("index.html".into()))
-        .title("Socorin update")
+    let (w, h) = size;
+    WebviewWindowBuilder::new(app, label, WebviewUrl::App("index.html".into()))
+        .title(title)
         .decorations(false)
         .transparent(true)
         .shadow(false)
@@ -357,7 +388,7 @@ pub fn show_update_notice<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> 
         .inner_size(w, h)
         .build()
         .map(|_| ())
-        .map_err(|e| format!("cannot create the update popover: {e}"))
+        .map_err(|e| format!("cannot create the {label} popover: {e}"))
 }
 
 pub fn reveal_update_notice<R: Runtime>(app: &AppHandle<R>) {
@@ -609,5 +640,16 @@ mod tests {
         show_update_notice(&app).unwrap(); // reused
         assert_eq!(app.webview_windows().values().filter(|w| w.label() == UPDATE).count(), 1);
         assert_eq!(UPDATE_MARGIN, 16.0);
+
+        // The share popover is its own window of the same kind.
+        reveal_share_notice(&app);
+        hide_share_notice(&app);
+        show_share_notice(&app).unwrap();
+        assert!(app.get_webview_window(SHARE).is_some());
+        reveal_share_notice(&app);
+        hide_share_notice(&app);
+        show_share_notice(&app).unwrap(); // reused
+        assert_eq!(app.webview_windows().values().filter(|w| w.label() == SHARE).count(), 1);
+        assert!(SHARE_SIZE.1 > UPDATE_SIZE.1);
     }
 }

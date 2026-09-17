@@ -48,5 +48,6 @@ describe("RecordBar", () => {
     expect(onStart).toHaveBeenLastCalledWith({ x: 8, y: 258, width: 300, height: 40 });
     expect(onCancel).toHaveBeenCalledTimes(2);
     expect(screen.getByText("Adjust the area, then")).toBeTruthy();
+    expect(bar().querySelector(".toolbar-logo")).toBeTruthy();
   });
 });

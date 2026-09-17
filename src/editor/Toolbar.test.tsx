@@ -21,6 +21,7 @@ function renderToolbar(overrides: Partial<Parameters<typeof Toolbar>[0]> = {}) {
     onCopy: vi.fn(),
     onSave: vi.fn(),
     onSaveAs: vi.fn(),
+    onUpload: vi.fn(),
     onClose: vi.fn(),
     ...overrides,
   };
@@ -37,6 +38,15 @@ describe("Toolbar (editor window)", () => {
     expect(container.querySelectorAll(".swatch:not(.custom)")).toHaveLength(COLORS.length);
     expect(container.querySelectorAll(".size-btn")).toHaveLength(STROKE_LEVELS.length);
     expect(screen.getByText("50%")).toBeTruthy();
+    // The logo leads the bar: decorative, not a button, not draggable.
+    const logo = container.querySelector(".toolbar-logo") as HTMLImageElement;
+    expect(logo.tagName).toBe("IMG");
+    expect(logo.getAttribute("alt")).toBe("");
+    expect(logo.getAttribute("aria-hidden")).toBe("true");
+    expect(logo.draggable).toBe(false);
+    expect(container.querySelector(".toolbar")!.firstElementChild).toBe(logo);
+    expect(logo.nextElementSibling!.className).toBe("sep");
+    expect(screen.getAllByRole("button").some((b) => b.contains(logo))).toBe(false);
 
     fireEvent.click(screen.getByTitle("Rectangle (R)"));
     expect(props.onTool).toHaveBeenCalledWith("rect");
@@ -80,6 +90,7 @@ describe("Toolbar (editor window)", () => {
     const { props } = renderToolbar({ busy: true });
     expect((screen.getByTitle("Undo (Ctrl/⌘+Z)") as HTMLButtonElement).disabled).toBe(true);
     expect((screen.getByTitle("Copy to clipboard (Ctrl/⌘+C)") as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByTitle("Upload & copy link (Ctrl/⌘+Shift+U)") as HTMLButtonElement).disabled).toBe(true);
     fireEvent.click(screen.getByTitle("Close (Esc)"));
     expect(props.onClose).toHaveBeenCalled();
     expect(screen.queryByTitle(/Open in the editor window/)).toBeNull();
@@ -90,12 +101,14 @@ describe("Toolbar (editor window)", () => {
     fireEvent.click(screen.getByTitle("Copy to clipboard (Ctrl/⌘+C)"));
     fireEvent.click(screen.getByTitle("Save to screenshots folder (Ctrl/⌘+S)"));
     fireEvent.click(screen.getByTitle("Save as… (Ctrl/⌘+Shift+S)"));
+    fireEvent.click(screen.getByTitle("Upload & copy link (Ctrl/⌘+Shift+U)"));
     expect(props.onCopy).toHaveBeenCalled();
-    // Save, Save as, then Copy (the primary one), then Close.
-    const labels = screen.getAllByRole("button").map((b) => b.textContent?.trim()).filter((t) => ["Save", "Save as", "Copy", "Close"].includes(t ?? ""));
-    expect(labels).toEqual(["Save", "Save as", "Copy", "Close"]);
+    // Save, Save as, Upload, then Copy (the primary one), then Close.
+    const labels = screen.getAllByRole("button").map((b) => b.textContent?.trim()).filter((t) => ["Save", "Save as", "Upload", "Copy", "Close"].includes(t ?? ""));
+    expect(labels).toEqual(["Save", "Save as", "Upload", "Copy", "Close"]);
     expect(props.onSave).toHaveBeenCalled();
     expect(props.onSaveAs).toHaveBeenCalled();
+    expect(props.onUpload).toHaveBeenCalled();
     const down = fireEvent.mouseDown(container.querySelector(".toolbar")!);
     expect(down).toBe(false); // default prevented
   });
@@ -105,6 +118,7 @@ describe("Toolbar (floating, in-place)", () => {
   it("toggles a tool off when it is clicked again and hides the style row without a tool", () => {
     const { props, container, rerender } = renderToolbar({ floating: true, tool: null, onEdit: vi.fn() });
     expect(container.querySelectorAll(".toolbar-row")).toHaveLength(1);
+    expect(container.querySelector(".toolbar-row")!.firstElementChild!.className).toBe("toolbar-logo");
     fireEvent.click(screen.getByTitle("Pen (P)"));
     expect(props.onTool).toHaveBeenCalledWith("pen");
     fireEvent.click(screen.getByTitle("Open in the editor window (Ctrl/⌘+E)"));

@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { PlatformInfo } from "../lib/ipc";
 import { isMac, prettyShortcut } from "../lib/hotkey";
 import { flush, installTauri, SETTINGS, UPDATE_STATUS, type TauriMock } from "../test/tauri";
-import { formatChecked, Settings } from "./Settings";
+import { describeLink, formatChecked, Settings } from "./Settings";
 
 let tauri: TauriMock;
 const platform = (extra: Partial<PlatformInfo> = {}): PlatformInfo => ({
@@ -21,8 +21,19 @@ beforeEach(() => {
     update_settings: (args) => ({ ...SETTINGS, ...(args as { patch: object }).patch }),
     default_save_dir: () => "/Users/me/Pictures/Screenshots",
     update_status: () => UPDATE_STATUS,
+    share_history: () => [],
   });
 });
+
+const LINK = {
+  id: "med-0123456789abcdefgh",
+  shareUrl: "https://socorin.com/s/med-0123456789abcdefgh",
+  expiresAt: "2026-11-17T00:00:00Z",
+  kind: "image" as const,
+  mime: "image/png",
+  size: 1_300_000,
+  createdAt: 1_758_000_000,
+};
 
 async function mountLoaded() {
   const view = render(<Settings />);
@@ -113,6 +124,7 @@ describe("Settings window", () => {
       filePrefix: "Shot",
       checkUpdates: true,
       autoUpdate: true,
+      uploadServer: "https://socorin.com",
     });
     // The style and welcome flags belong to other windows, the update
     // bookkeeping to Rust.
@@ -223,7 +235,7 @@ describe("Settings window", () => {
     expect(screen.queryByText(/Screen recording uses ffmpeg/)).toBeNull();
   });
 
-  it("describes ffmpeg on Linux and has no recording card on macOS", async () => {
+  it("describes ffmpeg on Linux and the MP4 conversion on macOS", async () => {
     tauri.handlers.platform_info = () => platform({ os: "linux" });
     const { unmount } = await mountLoaded();
     await screen.findByText(/Screen recording uses ffmpeg/);
@@ -232,8 +244,73 @@ describe("Settings window", () => {
 
     tauri.handlers.platform_info = () => platform();
     await mountLoaded();
-    await flush();
-    expect(screen.queryByRole("heading", { name: "Recording" })).toBeNull();
+    await screen.findByText(/converts it with ffmpeg/);
+    expect(screen.getByPlaceholderText("Found automatically (Homebrew)")).toBeTruthy();
+    expect(screen.queryByText(/Screen recording uses ffmpeg/)).toBeNull();
+  });
+
+  it("saves the upload server, offers the upload mode and reports a link", async () => {
+    await mountLoaded();
+    vi.useFakeTimers();
+    fireEvent.click(screen.getByLabelText("Upload and copy the link immediately"));
+    fireEvent.change(screen.getByPlaceholderText("https://socorin.com"), { target: { value: "http://localhost:3000" } });
+    fireEvent.click(saveButton());
+    await act(() => vi.advanceTimersByTimeAsync(1));
+    const patch = (tauri.calls("update_settings")[0] as { patch: Record<string, unknown> }).patch;
+    expect(patch).toMatchObject({ afterCapture: "upload", uploadServer: "http://localhost:3000" });
+    expect(patch).not.toHaveProperty("installId");
+    act(() => tauri.emit("capture-done", "link"));
+    expect(screen.getByText("Link copied").className).toContain("ok");
+  });
+
+  it("shows the install id with a reset, and the shared links with copy and delete", async () => {
+    tauri.handlers.get_settings = () => ({ ...SETTINGS, installId: "inst-00000000000000001" });
+    tauri.handlers.share_history = () => [LINK];
+    tauri.handlers.reset_install_id = () => ({ ...SETTINGS, installId: "" });
+    const { container } = await mountLoaded();
+    await screen.findByText(LINK.shareUrl);
+    expect(screen.getByText(/^image · 1\.2 MB · expires .*2026$/)).toBeTruthy(); // locale-dependent date
+    expect((container.querySelector("input[value='inst-00000000000000001']") as HTMLInputElement).readOnly).toBe(true);
+    const reset = screen.getByText("Reset install ID") as HTMLButtonElement;
+    expect(reset.disabled).toBe(false);
+    fireEvent.click(reset);
+    await screen.findByText(/Install ID reset/);
+    expect(tauri.calls("reset_install_id")).toHaveLength(1);
+    expect((screen.getByText("Reset install ID") as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByPlaceholderText("Not registered yet")).toBeTruthy();
+
+    fireEvent.click(screen.getByText("Copy"));
+    await screen.findByText("Link copied");
+    expect(tauri.calls("copy_share_link")[0]).toEqual({ id: LINK.id });
+    tauri.handlers.copy_share_link = () => Promise.reject("This link is no longer in the list.");
+    fireEvent.click(screen.getByText("Copy"));
+    await screen.findByText("This link is no longer in the list.");
+
+    // A refused delete keeps the line and shows the server's sentence.
+    tauri.handlers.delete_share = () => Promise.reject({ code: "forbidden", message: "socorin.com refused this upload." });
+    fireEvent.click(screen.getByText("Delete"));
+    await screen.findByText("socorin.com refused this upload.");
+    expect(screen.getByText(LINK.shareUrl)).toBeTruthy();
+    tauri.handlers.delete_share = () => undefined;
+    fireEvent.click(screen.getByText("Delete"));
+    await screen.findByText("Deleted from server");
+    expect(tauri.calls("delete_share")).toEqual([{ id: LINK.id }, { id: LINK.id }]);
+    expect(screen.queryByText(LINK.shareUrl)).toBeNull();
+    expect(screen.getByText(/No links yet/)).toBeTruthy();
+
+    // Rust says the history changed (another window uploaded): reloaded.
+    tauri.handlers.share_history = () => [{ ...LINK, id: "other", shareUrl: "https://socorin.com/s/other", kind: "video", size: 20_000, expiresAt: "nope" }];
+    act(() => tauri.emit("share:history"));
+    await screen.findByText("https://socorin.com/s/other");
+    expect(screen.getByText("video · 20 KB")).toBeTruthy();
+    expect(describeLink({ ...LINK, size: 100 })).toMatch(/^image · 1 KB · expires .*2026$/);
+
+    tauri.handlers.reset_install_id = () => Promise.reject("disk full");
+    tauri.handlers.get_settings = () => ({ ...SETTINGS, installId: "inst-2" });
+    fireEvent.focus(window);
+    await screen.findByText("inst-2", { selector: "input" }).catch(() => {});
+    fireEvent.click(await screen.findByText("Reset install ID"));
+    await screen.findByText("disk full");
   });
 
   it("wires the footer actions", async () => {

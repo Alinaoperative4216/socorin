@@ -13,7 +13,7 @@ use crate::{
     hotkey,
     record,
     settings::{self, Settings},
-    update, windows,
+    share, update, windows,
 };
 
 #[derive(Serialize)]
@@ -242,6 +242,13 @@ pub fn stop_recording_copy<R: Runtime>(app: AppHandle<R>) {
     record::stop_async_with(app, record::Outcome::Copy);
 }
 
+/// Stop, upload the file to the share server and put the link on the
+/// clipboard (the popover reports the outcome).
+#[tauri::command]
+pub fn stop_recording_upload<R: Runtime>(app: AppHandle<R>) {
+    record::stop_async_with(app, record::Outcome::Upload);
+}
+
 /// Stop and delete the file.
 #[tauri::command]
 pub fn cancel_recording<R: Runtime>(app: AppHandle<R>) {
@@ -273,6 +280,18 @@ pub fn update_settings<R: Runtime>(
     // The recorder runs whatever this names, so it has to be an ffmpeg.
     if patch.contains_key("ffmpegPath") && !settings.ffmpeg_path.is_empty() {
         record::configured_ffmpeg(&settings.ffmpeg_path)?;
+    }
+
+    // The share server: `normalise` quietly falls back to socorin.com, but
+    // the settings window should hear that its entry was not an address.
+    if let Some(raw) = patch.get("uploadServer").and_then(|v| v.as_str()) {
+        let raw = raw.trim();
+        if !raw.is_empty() && settings.upload_server == settings::DEFAULT_UPLOAD_SERVER && settings::sanitise_server(raw) != raw.trim_end_matches('/') && !raw.trim_end_matches('/').eq_ignore_ascii_case(settings::DEFAULT_UPLOAD_SERVER) {
+            return Err(format!(
+                "The upload server must be an http(s) address such as {} or http://localhost:3000.",
+                settings::DEFAULT_UPLOAD_SERVER
+            ));
+        }
     }
 
     // Validate hotkeys by registering them; roll back on failure. Only when
@@ -392,6 +411,62 @@ pub fn dismiss_update<R: Runtime>(app: AppHandle<R>) {
 #[tauri::command]
 pub fn update_ready<R: Runtime>(app: AppHandle<R>) {
     windows::reveal_update_notice(&app);
+}
+
+// ---- sharing ----
+
+/// Body: PNG bytes. Uploads it to the share server, puts the link on the
+/// clipboard and shows the popover. Resolves to the link; a failure comes
+/// back as a `ShareError` (`{ code, message, … }`) for the page's toast.
+#[tauri::command]
+pub async fn upload_png<R: Runtime>(app: AppHandle<R>, request: Request<'_>) -> Result<share::ShareResult, share::ShareError> {
+    let png = raw_body(&request).map_err(|e| share::ShareError::new("invalid_request", e))?;
+    share::share_png(&app, png).await
+}
+
+/// The remembered links, newest first (without their delete tokens).
+#[tauri::command]
+pub fn share_history<R: Runtime>(app: AppHandle<R>) -> Vec<share::PublicLink> {
+    share::history(&app).iter().map(share::SharedLink::public).collect()
+}
+
+/// "Delete from server" for a remembered link.
+#[tauri::command]
+pub async fn delete_share<R: Runtime>(app: AppHandle<R>, id: String) -> Result<(), share::ShareError> {
+    share::delete(&app, &id).await
+}
+
+/// Put a remembered link on the clipboard again.
+#[tauri::command]
+pub fn copy_share_link<R: Runtime>(app: AppHandle<R>, id: String) -> Result<(), String> {
+    share::copy_link(&app, &id)
+}
+
+/// Settings → "Reset install ID": the next upload registers a new one.
+#[tauri::command]
+pub fn reset_install_id<R: Runtime>(app: AppHandle<R>) -> Result<Settings, String> {
+    let mut settings = settings::current(&app);
+    settings.install_id.clear();
+    settings::store(&app, settings.clone())?;
+    Ok(settings)
+}
+
+/// What the "Link copied" popover shows.
+#[tauri::command]
+pub fn share_notice<R: Runtime>(app: AppHandle<R>) -> Option<share::Notice> {
+    share::notice(&app)
+}
+
+/// The popover has rendered: show its window.
+#[tauri::command]
+pub fn share_ready<R: Runtime>(app: AppHandle<R>) {
+    windows::reveal_share_notice(&app);
+}
+
+/// Close / Escape / the timer in the popover.
+#[tauri::command]
+pub fn dismiss_share<R: Runtime>(app: AppHandle<R>) {
+    share::dismiss(&app);
 }
 
 #[tauri::command]
@@ -647,6 +722,56 @@ mod tests {
         update_ready(handle.clone()); // no popover window: nothing to show
         dismiss_update(handle.clone());
         assert_eq!(update_status(handle).phase, update::Phase::Idle);
+    }
+
+    #[test]
+    fn the_upload_server_setting_is_validated_when_saved() {
+        let dir = temp_dir("cmd-share-settings");
+        let app = app_with(settings_in(&dir));
+        let handle = app.handle().clone();
+        let updated = update_settings(handle.clone(), patch(json!({ "uploadServer": "http://localhost:3000/" }))).unwrap();
+        assert_eq!(updated.upload_server, "http://localhost:3000");
+        // Empty, or the default with a slash: back to socorin.com, no complaint.
+        assert_eq!(update_settings(handle.clone(), patch(json!({ "uploadServer": " " }))).unwrap().upload_server, settings::DEFAULT_UPLOAD_SERVER);
+        assert_eq!(update_settings(handle.clone(), patch(json!({ "uploadServer": "https://socorin.com/" }))).unwrap().upload_server, settings::DEFAULT_UPLOAD_SERVER);
+        for bad in ["socorin.com", "ftp://x", "https://socorin.com/api", "nope"] {
+            let err = update_settings(handle.clone(), patch(json!({ "uploadServer": bad }))).unwrap_err();
+            assert!(err.contains("http(s) address"), "{bad}: {err}");
+        }
+        assert_eq!(get_settings(handle.clone()).upload_server, settings::DEFAULT_UPLOAD_SERVER);
+
+        // The install id is Rust's: reset empties it.
+        *handle.state::<settings::SettingsState>().0.lock().unwrap() = Settings { install_id: "abc".into(), ..settings::current(&handle) };
+        assert_eq!(reset_install_id(handle.clone()).unwrap().install_id, "");
+        assert_eq!(get_settings(handle.clone()).install_id, "");
+    }
+
+    /// The upload itself is tested in `share` against a local server; here
+    /// the commands are reached through the IPC layer with a body that
+    /// cannot go anywhere (no server listening).
+    #[test]
+    fn share_commands_take_raw_bodies_and_report_share_errors() {
+        let dir = temp_dir("cmd-share");
+        let app = app_with(Settings { upload_server: "http://127.0.0.1:9".into(), ..settings_in(&dir) });
+        let handle = app.handle().clone();
+        share::reset(&handle);
+        let err = invoke(&handle, "upload_png", InvokeBody::Json(json!({})), &[]).unwrap_err();
+        assert_eq!(err["code"], "invalid_request");
+        let err = invoke(&handle, "upload_png", InvokeBody::Raw(b"\x89PNG".to_vec()), &[]).unwrap_err();
+        assert_eq!(err["code"], "network");
+        assert!(err["message"].as_str().unwrap().contains("127.0.0.1:9"));
+        assert!(matches!(share_notice(handle.clone()), Some(share::Notice::Failed { .. })));
+
+        assert!(share_history(handle.clone()).is_empty());
+        let err = tauri::async_runtime::block_on(delete_share(handle.clone(), "nope".into())).unwrap_err();
+        assert_eq!(err.code, "not_found");
+        assert!(copy_share_link(handle.clone(), "nope".into()).is_err());
+        share_ready(handle.clone());
+        dismiss_share(handle.clone());
+        stop_recording_upload(handle.clone()); // not recording: logged
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        let res = invoke(&handle, "share_history", InvokeBody::default(), &[]).unwrap();
+        assert_eq!(res.deserialize::<Vec<share::PublicLink>>().unwrap(), vec![]);
     }
 
     /// `request_screen_permission` would show the macOS prompt; only its

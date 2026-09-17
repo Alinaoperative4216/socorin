@@ -609,6 +609,12 @@ fn deliver<R: Runtime>(app: &AppHandle<R>, png: Vec<u8>) -> Result<(), String> {
             let _ = app.emit("capture-done", path.to_string_lossy().into_owned());
             Ok(())
         }
+        AfterCapture::Upload => {
+            // The upload takes a moment: a worker thread does it and the
+            // popover reports the link (or the failure).
+            crate::share::share_png_async(app, png);
+            Ok(())
+        }
     }
 }
 
@@ -830,6 +836,31 @@ mod session_tests {
         assert_eq!((img.width(), img.height()), (40, 20));
         assert!(!is_busy(&app));
         assert!(app.state::<AppState>().shots.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn finish_region_uploads_in_upload_mode() {
+        let dir = temp_dir("capture-upload");
+        let fake = crate::share::tests::Fake::new(1000, 5_000_000);
+        let base = crate::share::tests::serve_fake(&fake);
+        let app = app_with(Settings { after_capture: AfterCapture::Upload, upload_server: base, ..settings_in(&dir) });
+        crate::share::reset(app.handle());
+        start_session(&app, vec![shot(geom(1, 0, 0, 100, 50, 2.0, true))]);
+        finish_region(&app, region(1, 10, 10, 40, 20)).unwrap();
+        assert!(!is_busy(&app));
+        for _ in 0..300 {
+            if crate::share::notice(&app).is_some() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let Some(crate::share::Notice::Shared { link, .. }) = crate::share::notice(&app) else {
+            panic!("{:?}", crate::share::notice(&app))
+        };
+        assert!(link.share_url.starts_with("https://socorin.com/s/"));
+        assert_eq!(link.kind, crate::share::Kind::Image);
+        assert!(std::fs::read_dir(&dir).unwrap().next().is_none(), "nothing is saved locally");
+        crate::share::dismiss(&app);
     }
 
     #[test]

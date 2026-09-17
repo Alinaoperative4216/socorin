@@ -276,7 +276,7 @@ async fn fetch_latest(url: &str) -> Result<Version, String> {
 /// reqwest is built without a default TLS backend (the updater plugin does
 /// the same and installs ring on first use); make sure one is there before
 /// a client is built.
-fn ensure_crypto_provider() {
+pub(crate) fn ensure_crypto_provider() {
     if rustls::crypto::CryptoProvider::get_default().is_none() {
         let _ = rustls::crypto::ring::default_provider().install_default();
     }

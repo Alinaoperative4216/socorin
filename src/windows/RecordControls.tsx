@@ -1,13 +1,16 @@
 import type { MouseEvent as ReactMouseEvent } from "react";
-import { Check, ClipboardCopy, Disc, Square, X } from "lucide-react";
+import { Check, ClipboardCopy, CloudUpload, Disc, Square, X } from "lucide-react";
+import { ToolbarLogo } from "../editor/Toolbar";
 
 /**
  * What the bar is doing. `ready`: the area is selected, Record / Cancel.
  * `recording` (and `starting`, before the encoder is up): the clock and
- * Stop & copy / Stop / Cancel. `stopping`: a stop is in flight. `copied`:
- * the file is on the clipboard, the bar is about to go.
+ * Stop & copy / Stop & upload / Stop / Cancel. `stopping`: a stop is in
+ * flight. `uploading`: the file is on its way to the share server.
+ * `copied` / `shared`: the file or its link is on the clipboard, the bar
+ * is about to go.
  */
-export type RecordPhase = "ready" | "starting" | "recording" | "stopping" | "copied";
+export type RecordPhase = "ready" | "starting" | "recording" | "stopping" | "uploading" | "copied" | "shared";
 
 interface Props {
   phase: RecordPhase;
@@ -16,6 +19,7 @@ interface Props {
   onRecord?: () => void;
   onStop?: () => void;
   onStopCopy?: () => void;
+  onStopUpload?: () => void;
   onCancel?: () => void;
 }
 
@@ -33,19 +37,28 @@ export function formatElapsed(ms: number): string {
  * with a fixed width and fixed button slots, so nothing moves between the
  * two: Record becomes Stop, Cancel stays Cancel.
  */
-export function RecordControls({ phase, elapsedMs, onRecord, onStop, onStopCopy, onCancel }: Props) {
+export function RecordControls({ phase, elapsedMs, onRecord, onStop, onStopCopy, onStopUpload, onCancel }: Props) {
   // Buttons must not take keyboard focus (Enter / Esc are handled by the owner).
   const stopFocus = (e: ReactMouseEvent) => e.preventDefault();
-  const busy = phase === "stopping" || phase === "copied";
+  const busy = phase === "stopping" || phase === "uploading" || phase === "copied" || phase === "shared";
 
   return (
     <div className={`toolbar floating record-bar phase-${phase}`} onMouseDown={stopFocus}>
       <div className="toolbar-row">
+        <ToolbarLogo />
         {phase === "ready" ? (
           <span className="record-hint">Adjust the area, then</span>
         ) : phase === "copied" ? (
           <span className="record-status">
             <Check size={16} className="rec-ok" /> Copied to clipboard
+          </span>
+        ) : phase === "shared" ? (
+          <span className="record-status">
+            <Check size={16} className="rec-ok" /> Link copied
+          </span>
+        ) : phase === "uploading" ? (
+          <span className="record-status">
+            <CloudUpload size={16} className="rec-busy" /> Uploading…
           </span>
         ) : (
           <span className="record-status">
@@ -73,6 +86,15 @@ export function RecordControls({ phase, elapsedMs, onRecord, onStop, onStopCopy,
               onClick={onStopCopy}
             >
               <ClipboardCopy size={16} /> Stop &amp; copy
+            </button>
+            <button
+              type="button"
+              className="tool-btn wide stop-upload"
+              title="Stop and upload the video, copying its link"
+              disabled={busy}
+              onClick={onStopUpload}
+            >
+              <CloudUpload size={16} /> Stop &amp; upload
             </button>
             <button type="button" className="tool-btn wide stop" title="Stop recording" disabled={busy} onClick={onStop}>
               <Square size={13} fill="currentColor" /> Stop

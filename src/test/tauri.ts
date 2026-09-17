@@ -113,6 +113,8 @@ export const SETTINGS: Settings = {
   updateCheckedAt: 0,
   updateAvailable: "",
   lastVersion: "1.0.2",
+  uploadServer: "https://socorin.com",
+  installId: "",
 };
 
 export const UPDATE_STATUS: UpdateStatus = {

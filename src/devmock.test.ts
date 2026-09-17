@@ -71,6 +71,28 @@ describe("devmock", () => {
     expect(await internals().invoke("debug_options")).toEqual({ enabled: false, dumpDir: null, autoSelect: null, autoAction: null });
   });
 
+  it("answers the share commands", async () => {
+    installMock("main");
+    const links = (await internals().invoke("share_history")) as { id: string; shareUrl: string }[];
+    expect(links).toHaveLength(1);
+    expect(links[0].shareUrl).toContain("/s/");
+    const notice = (await internals().invoke("share_notice")) as { kind: string };
+    expect(notice.kind).toBe("shared");
+    window.history.replaceState({}, "", "/?mock=share&state=failed");
+    expect(((await internals().invoke("share_notice")) as { kind: string }).kind).toBe("failed");
+    const pending = internals().invoke("upload_png", new ArrayBuffer(10));
+    await vi.advanceTimersByTimeAsync(1300);
+    expect(((await pending) as { deleteToken: string }).deleteToken).toBe("del-mock");
+    await internals().invoke("copy_share_link", { id: links[0].id });
+    await internals().invoke("stop_recording_upload");
+    await internals().invoke("share_ready");
+    await internals().invoke("dismiss_share");
+    const reset = (await internals().invoke("reset_install_id")) as { installId: string };
+    expect(reset.installId).toBe("");
+    await internals().invoke("delete_share", { id: links[0].id });
+    expect((await internals().invoke("share_history")) as unknown[]).toHaveLength(0);
+  });
+
   it("logs the fire-and-forget commands", async () => {
     installMock("overlay-1");
     const buf = new ArrayBuffer(10);

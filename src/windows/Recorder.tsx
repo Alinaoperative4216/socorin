@@ -7,8 +7,9 @@ import { RecordControls, type RecordPhase } from "./RecordControls";
  * The floating bar shown while a region records: its own small transparent
  * always-on-top window that Rust puts exactly where the overlay's Record
  * bar was, so the buttons stay put. Shows the elapsed time and
- * Stop & copy / Stop / Cancel; says "Copied to clipboard" for a moment
- * after Stop & copy.
+ * Stop & copy / Stop & upload / Stop / Cancel; says "Copied to clipboard"
+ * or "Link copied" for a moment after Stop & copy / Stop & upload, and
+ * "Uploading…" while the file is on its way.
  */
 export function Recorder() {
   const [status, setStatus] = useState<RecordingStatus | null>(null);
@@ -34,9 +35,13 @@ export function Recorder() {
         setStatus(e.payload);
         setPhase("recording");
       }),
+      listen("recording:uploading", () => {
+        setStatus(null);
+        setPhase("uploading");
+      }),
       listen<RecordingStopped>("recording:stopped", (e) => {
         setStatus(null);
-        setPhase(e.payload?.copied ? "copied" : "starting");
+        setPhase(e.payload?.link ? "shared" : e.payload?.copied ? "copied" : "starting");
       }),
     ];
     const timer = window.setInterval(() => setNow(Date.now()), 250);
@@ -60,6 +65,7 @@ export function Recorder() {
           elapsedMs={elapsed}
           onStop={stop(ipc.stopRecording)}
           onStopCopy={stop(ipc.stopRecordingCopy)}
+          onStopUpload={stop(ipc.stopRecordingUpload)}
           onCancel={stop(ipc.cancelRecording)}
         />
       </div>

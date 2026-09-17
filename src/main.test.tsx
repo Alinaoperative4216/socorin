@@ -33,6 +33,12 @@ async function boot(label: string, search = "") {
     recording_status: () => ({ recording: false, startedMs: 0, path: "" }),
     debug_options: () => ({ enabled: false, dumpDir: null, autoSelect: null, autoAction: null }),
     update_status: () => ({ ...UPDATE_STATUS, available: "9.9.9" }),
+    share_history: () => [],
+    share_notice: () => ({
+      kind: "shared",
+      link: { id: "m", shareUrl: "https://socorin.com/s/m", expiresAt: "2999-01-01T00:00:00Z", kind: "image", mime: "image/png", size: 1, createdAt: 0 },
+      retentionDays: 60,
+    }),
   });
   vi.resetModules();
   await import("./main");
@@ -82,6 +88,13 @@ describe("main.tsx routing by window label", () => {
     expect(document.documentElement.dataset.window).toBe("update");
     await screen.findByText("Socorin 9.9.9 is available");
     await waitFor(() => expect(tauri.calls("update_ready")).toHaveLength(1));
+  });
+
+  it("mounts the share popover", async () => {
+    await boot("share");
+    expect(document.documentElement.dataset.window).toBe("share");
+    await screen.findByText("https://socorin.com/s/m");
+    await waitFor(() => expect(tauri.calls("share_ready")).toHaveLength(1));
   });
 
   it("mounts the settings window for the main label", async () => {

@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState, type KeyboardEvent } from "re
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { ipc, type PlatformInfo, type Settings as SettingsModel, type UpdateStatus } from "../lib/ipc";
+import { ipc, shareErrorMessage, type PlatformInfo, type Settings as SettingsModel, type SharedLink, type UpdateStatus } from "../lib/ipc";
 import { isMac, prettyShortcut, shortcutFromEvent } from "../lib/hotkey";
 
 type Status = { kind: "ok" | "error"; text: string } | null;
@@ -13,6 +13,14 @@ export function formatChecked(unixSeconds: number, now = new Date()): string {
   const sameDay = d.toDateString() === now.toDateString();
   const time = d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
   return sameDay ? `today ${time}` : d.toLocaleDateString([], { day: "numeric", month: "short", year: "numeric" });
+}
+
+/** "image · 1.2 MB · expires 17 Nov 2026" for a shared link. */
+export function describeLink(link: SharedLink): string {
+  const size = link.size >= 1024 * 1024 ? `${(link.size / (1024 * 1024)).toFixed(1)} MB` : `${Math.max(1, Math.round(link.size / 1024))} KB`;
+  const at = new Date(link.expiresAt);
+  const expires = Number.isNaN(at.getTime()) ? "" : ` · expires ${at.toLocaleDateString([], { day: "numeric", month: "short", year: "numeric" })}`;
+  return `${link.kind} · ${size}${expires}`;
 }
 
 function HotkeyField({
@@ -86,6 +94,8 @@ export function Settings() {
   const [saving, setSaving] = useState(false);
   const [updateInfo, setUpdateInfo] = useState<UpdateStatus | null>(null);
   const [checking, setChecking] = useState(false);
+  const [links, setLinks] = useState<SharedLink[]>([]);
+  const [busyLink, setBusyLink] = useState<string | null>(null);
   const statusTimer = useRef<number | undefined>(undefined);
   const dirtyRef = useRef(false);
   dirtyRef.current = dirty;
@@ -100,9 +110,16 @@ export function Settings() {
     ipc.platformInfo().then(setPlatform).catch(console.error);
   }, []);
 
+  const refreshLinks = useCallback(() => {
+    ipc.shareHistory()
+      .then((list) => setLinks(Array.isArray(list) ? list : []))
+      .catch(() => {});
+  }, []);
+
   useEffect(() => {
     ipc.getSettings().then(setSettings).catch((e) => flash({ kind: "error", text: String(e) }));
     refreshPlatform();
+    refreshLinks();
     ipc.updateStatus().then(setUpdateInfo).catch(() => {});
     const unlisten = [
       listen("screen-permission-missing", () => {
@@ -111,12 +128,17 @@ export function Settings() {
       }),
       listen<string>("capture-error", (e) => flash({ kind: "error", text: e.payload }, 8000)),
       listen<string>("capture-done", (e) =>
-        flash({ kind: "ok", text: e.payload === "clipboard" ? "Copied to clipboard" : `Saved to ${e.payload}` }),
+        flash({
+          kind: "ok",
+          text: e.payload === "clipboard" ? "Copied to clipboard" : e.payload === "link" ? "Link copied" : `Saved to ${e.payload}`,
+        }),
       ),
       listen<UpdateStatus>("update:status", (e) => setUpdateInfo(e.payload)),
+      listen("share:history", refreshLinks),
     ];
     const onFocus = () => {
       refreshPlatform();
+      refreshLinks();
       // Other windows (overlay, welcome) save settings too; this window is
       // created hidden at startup, so its copy may be stale by the time it
       // is shown. Only reload while nothing is being edited here.
@@ -127,7 +149,7 @@ export function Settings() {
       unlisten.forEach((p) => p.then((f) => f()));
       window.removeEventListener("focus", onFocus);
     };
-  }, [flash, refreshPlatform]);
+  }, [flash, refreshPlatform, refreshLinks]);
 
   const update = (patch: Partial<SettingsModel>) => {
     setSettings((s) => (s ? { ...s, ...patch } : s));
@@ -152,6 +174,7 @@ export function Settings() {
         ffmpegPath,
         checkUpdates,
         autoUpdate,
+        uploadServer,
       } = settings;
       const saved = await ipc.updateSettings({
         hotkey,
@@ -166,6 +189,7 @@ export function Settings() {
         ffmpegPath,
         checkUpdates,
         autoUpdate,
+        uploadServer,
       });
       setSettings(saved);
       setDirty(false);
@@ -198,6 +222,38 @@ export function Settings() {
       flash({ kind: "error", text: String(e) }, 8000);
     } finally {
       setChecking(false);
+    }
+  };
+
+  const resetInstallId = async () => {
+    try {
+      const saved = await ipc.resetInstallId();
+      setSettings((s) => (s ? { ...s, installId: saved.installId } : s));
+      flash({ kind: "ok", text: "Install ID reset; the next upload registers a new one" });
+    } catch (e) {
+      flash({ kind: "error", text: String(e) }, 8000);
+    }
+  };
+
+  const copyLink = async (id: string) => {
+    try {
+      await ipc.copyShareLink(id);
+      flash({ kind: "ok", text: "Link copied" });
+    } catch (e) {
+      flash({ kind: "error", text: String(e) }, 8000);
+    }
+  };
+
+  const deleteLink = async (id: string) => {
+    setBusyLink(id);
+    try {
+      await ipc.deleteShare(id);
+      setLinks((list) => list.filter((l) => l.id !== id));
+      flash({ kind: "ok", text: "Deleted from server" });
+    } catch (e) {
+      flash({ kind: "error", text: shareErrorMessage(e) }, 8000);
+    } finally {
+      setBusyLink(null);
     }
   };
 
@@ -303,6 +359,7 @@ export function Settings() {
               ["editor", "Annotate on screen (toolbar next to the selection)"],
               ["clipboard", "Copy to clipboard immediately"],
               ["save", "Save to folder immediately"],
+              ["upload", "Upload and copy the link immediately"],
             ] as const
           ).map(([value, text]) => (
             <label key={value} className="radio">
@@ -354,7 +411,7 @@ export function Settings() {
         </p>
       </section>
 
-      {platform && platform.os !== "macos" && (
+      {platform && (
         <section className="card">
           <h2>Recording</h2>
           <label className="field">
@@ -362,7 +419,9 @@ export function Settings() {
             <input
               value={settings.ffmpegPath}
               onChange={(e) => update({ ffmpegPath: e.target.value })}
-              placeholder={platform.os === "windows" ? "Built-in recorder" : "Found automatically"}
+              placeholder={
+                platform.os === "windows" ? "Built-in recorder" : platform.os === "macos" ? "Found automatically (Homebrew)" : "Found automatically"
+              }
             />
           </label>
           <p className="hint">
@@ -371,6 +430,12 @@ export function Settings() {
                 Windows 10 version 1903 and later record with the built-in recorder (Windows Graphics Capture, H.264).
                 Enter the full path of <code>ffmpeg.exe</code> to record with ffmpeg instead; an installed ffmpeg also
                 steps in when the built-in recorder is unavailable.
+              </>
+            ) : platform.os === "macos" ? (
+              <>
+                macOS records with the system <code>screencapture</code>, which writes QuickTime <code>.mov</code> files.
+                Uploading a recording needs an MP4, so Socorin converts it with ffmpeg first (no re-encoding). Leave this
+                empty to look in the usual places (Homebrew), or enter the full path of <code>ffmpeg</code>.
               </>
             ) : (
               <>
@@ -381,6 +446,56 @@ export function Settings() {
           </p>
         </section>
       )}
+
+      <section className="card">
+        <h2>Share</h2>
+        <label className="field">
+          <span>Upload server</span>
+          <input
+            value={settings.uploadServer}
+            onChange={(e) => update({ uploadServer: e.target.value })}
+            placeholder="https://socorin.com"
+            spellCheck={false}
+          />
+        </label>
+        <label className="field">
+          <span>Install ID</span>
+          <div className="row grow">
+            <input readOnly value={settings.installId} placeholder="Not registered yet" />
+            <button type="button" className="ghost" disabled={!settings.installId} onClick={resetInstallId}>
+              Reset install ID
+            </button>
+          </div>
+        </label>
+        <p className="hint">
+          <em>Upload &amp; copy link</em> sends a capture to this server, which keeps it for a limited time (60 days and
+          5 MB per file on socorin.com) and answers with a link that goes to the clipboard. Nothing is uploaded unless
+          you ask. The install ID is a random token the server hands out to hold off spam; there are no accounts.
+        </p>
+        <h3>Shared links</h3>
+        {links.length === 0 ? (
+          <p className="hint">No links yet. Links you make appear here so you can copy them again or delete the file.</p>
+        ) : (
+          <ul className="share-list">
+            {links.map((link) => (
+              <li key={link.id}>
+                <span>
+                  <code className="share-link" title={link.shareUrl}>
+                    {link.shareUrl}
+                  </code>
+                  <span className="share-meta">{describeLink(link)}</span>
+                </span>
+                <button type="button" className="ghost" onClick={() => copyLink(link.id)}>
+                  Copy
+                </button>
+                <button type="button" className="ghost danger" disabled={busyLink === link.id} onClick={() => deleteLink(link.id)}>
+                  {busyLink === link.id ? "Deleting…" : "Delete"}
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
+      </section>
 
       <section className="card">
         <h2>System</h2>

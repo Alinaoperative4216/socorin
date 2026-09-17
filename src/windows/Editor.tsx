@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { listen } from "@tauri-apps/api/event";
-import { ipc, type Settings } from "../lib/ipc";
+import { ipc, shareErrorMessage, type Settings } from "../lib/ipc";
 import { isMac } from "../lib/hotkey";
 import { AnnotationStage } from "../editor/AnnotationStage";
 import { Toolbar, TOOLS } from "../editor/Toolbar";
@@ -131,7 +131,7 @@ export function Editor() {
       try {
         await fn();
       } catch (e) {
-        notify(String(e), true);
+        notify(shareErrorMessage(e), true);
       } finally {
         setBusy(false);
       }
@@ -167,6 +167,19 @@ export function Editor() {
     [run, a.renderPng, notify],
   );
 
+  // Upload & copy link: Rust copies the link and shows the popover; the
+  // status bar says so as well while this window has the eye.
+  const upload = useCallback(
+    () =>
+      run(async () => {
+        const png = await a.renderPng();
+        notify("Uploading…");
+        await ipc.uploadPng(png);
+        notify("Link copied");
+      }),
+    [run, a.renderPng, notify],
+  );
+
   actionsRef.current = { copy, quickSave };
 
   const close = useCallback(() => void getCurrentWindow().close(), []);
@@ -193,6 +206,9 @@ export function Editor() {
         e.preventDefault();
         if (e.shiftKey) void saveAs();
         else void quickSave();
+      } else if (mod && e.shiftKey && key === "u") {
+        e.preventDefault();
+        void upload();
       } else if (mod && (key === "=" || key === "+")) {
         e.preventDefault();
         changeZoom(1);
@@ -209,7 +225,7 @@ export function Editor() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [handleKey, copy, quickSave, saveAs, changeZoom, fitZoom, close]);
+  }, [handleKey, copy, quickSave, saveAs, upload, changeZoom, fitZoom, close]);
 
   // Ctrl/⌘ + wheel zoom.
   useEffect(() => {
@@ -262,6 +278,7 @@ export function Editor() {
         onCopy={copy}
         onSave={quickSave}
         onSaveAs={saveAs}
+        onUpload={upload}
         onClose={close}
       />
 

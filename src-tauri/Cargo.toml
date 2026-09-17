@@ -1,6 +1,6 @@
 [package]
 name = "socorin"
-version = "1.0.2"
+version = "1.1.0"
 description = "Lightweight cross-platform screenshot and annotation tool"
 authors = ["Socorin"]
 homepage = "https://socorin.com"
@@ -49,6 +49,11 @@ semver = "1"
 url = "2"
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls-no-provider", "system-proxy"] }
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
+# Sharing a capture on socorin.com (share.rs): the upload is checksummed
+# with SHA-256 and the chunk retries wait on the async runtime's clock
+# (tokio is what tauri's runtime is; only its timer is used directly).
+sha2 = "0.10"
+tokio = { version = "1", default-features = false, features = ["time"] }
 
 
 # Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration

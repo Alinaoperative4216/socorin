@@ -70,6 +70,23 @@ describe("Editor window", () => {
     expect(toast.className).toContain("error");
   });
 
+  it("uploads and reports the link, or the share error", async () => {
+    await mountLoaded();
+    let finish: (v: unknown) => void = () => {};
+    tauri.handlers.upload_png = () => new Promise((r) => (finish = r));
+    fireEvent.click(screen.getByTitle("Upload & copy link (Ctrl/⌘+Shift+U)"));
+    await screen.findByText("Uploading…");
+    expect(tauri.invoke).toHaveBeenLastCalledWith("upload_png", expect.any(Uint8Array), undefined);
+    finish({ id: "x", shareUrl: "https://socorin.com/s/x" });
+    await screen.findByText("Link copied");
+
+    tauri.handlers.upload_png = () => Promise.reject({ code: "rate_limited", message: "Too many uploads for now. Try again in 30 seconds.", retryAfterSeconds: 30 });
+    fireEvent.keyDown(window, { key: "U", shiftKey: true, ...mod });
+    const toast = await screen.findByText("Too many uploads for now. Try again in 30 seconds.");
+    expect(toast.className).toContain("error");
+    expect(tauri.calls("upload_png")).toHaveLength(2);
+  });
+
   it("handles the keyboard shortcuts", async () => {
     await mountLoaded();
     fireEvent.keyDown(window, { key: "c", ...mod });

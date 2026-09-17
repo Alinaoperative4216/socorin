@@ -3,9 +3,9 @@
 //! Idle, the menu offers the captures and recordings. While a recording
 //! runs the icon is a steady red dot (no blinking: it distracts), the
 //! elapsed time sits next to it (macOS) and the menu becomes the
-//! recording's remote control: the running time, Stop & Copy, Stop,
-//! Cancel. That is the whole UI of a full-screen recording, which shows no
-//! floating bar.
+//! recording's remote control: the running time, Stop & Copy, Stop &
+//! Upload Link, Stop, Cancel. That is the whole UI of a full-screen
+//! recording, which shows no floating bar.
 
 use std::{
     sync::{
@@ -111,6 +111,7 @@ pub fn create<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
             "record" => record::begin_region(app.clone()),
             "record_full" => record::begin_fullscreen(app.clone()),
             "stop_copy" => record::stop_async_with(app.clone(), record::Outcome::Copy),
+            "stop_upload" => record::stop_async_with(app.clone(), record::Outcome::Upload),
             "stop_record" => record::stop_async_with(app.clone(), record::Outcome::Reveal),
             "cancel_record" => record::stop_async_with(app.clone(), record::Outcome::Discard),
             "update" => update::install(app),
@@ -161,6 +162,8 @@ fn build_items<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<TrayItems<R>> {
     // `&&`: a literal ampersand (a single `&` marks a mnemonic).
     let stop_copy_item =
         MenuItem::with_id(app, "stop_copy", "Stop && Copy to Clipboard", true, None::<&str>)?;
+    let stop_upload_item =
+        MenuItem::with_id(app, "stop_upload", "Stop && Upload Link", true, None::<&str>)?;
     let stop_item = MenuItem::with_id(app, "stop_record", "Stop", true, None::<&str>)?;
     let cancel_item = MenuItem::with_id(app, "cancel_record", "Cancel Recording", true, None::<&str>)?;
     let recording_menu = Menu::with_items(
@@ -169,6 +172,7 @@ fn build_items<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<TrayItems<R>> {
             &timer,
             &PredefinedMenuItem::separator(app)?,
             &stop_copy_item,
+            &stop_upload_item,
             &stop_item,
             &cancel_item,
             &PredefinedMenuItem::separator(app)?,
@@ -336,9 +340,9 @@ fn recording_icon() -> Image<'static> {
 /// The app logo as a menu bar glyph (36x36 px, rendered at 18pt): the
 /// squircle of `design/logo.svg`, filled, with the S cut out of it. A
 /// template image, so macOS paints it in the menu bar's own colour. Drawn
-/// procedurally from the same geometry as the SVG (a superellipse and two
-/// elliptical arcs), 4x4 supersampled so it stays crisp on Retina, and
-/// computed once.
+/// procedurally from the same geometry as the SVG (a superellipse and the
+/// S's cubic Bézier spine), 4x4 supersampled so it stays crisp on Retina,
+/// and computed once.
 #[cfg(target_os = "macos")]
 fn template_icon() -> Image<'static> {
     use std::sync::OnceLock;
@@ -354,26 +358,34 @@ const LOGO_ICON_SIZE: u32 = 36;
 #[cfg(target_os = "macos")]
 const LOGO_GLYPH_PX: f32 = 32.0;
 
-/// The S of the logo as a dense polyline, in the logo's 1024-unit space:
-/// two elliptical arcs (172 x 126) meeting at the centre, from -8° on the
-/// top ellipse over its top and down to the centre, then over the bottom
-/// ellipse's bottom up to 188° (see `design/logo.svg`).
+/// The spine of the S in `design/logo.svg`, in the logo's 1024-unit space:
+/// the `M … C …` path of the SVG, six cubic Bézier segments from the top
+/// right end over the upper bowl, through the diagonal waist and round the
+/// wider lower bowl to the bottom left end. Kept in step with the SVG by
+/// hand; the test below checks the ends.
+#[cfg(target_os = "macos")]
+const LOGO_S_PATH: [[(f32, f32); 4]; 6] = [
+    [(668.0, 354.0), (652.0, 291.0), (589.0, 267.0), (518.0, 267.0)],
+    [(518.0, 267.0), (427.0, 267.0), (356.0, 313.0), (356.0, 381.0)],
+    [(356.0, 381.0), (356.0, 449.0), (420.0, 477.0), (512.0, 505.0)],
+    [(512.0, 505.0), (604.0, 533.0), (684.0, 565.0), (684.0, 641.0)],
+    [(684.0, 641.0), (684.0, 712.0), (611.0, 757.0), (516.0, 757.0)],
+    [(516.0, 757.0), (435.0, 757.0), (365.0, 726.0), (348.0, 655.0)],
+];
+
+/// The S as a dense polyline (about 3 units between samples, well under
+/// the 54-unit stroke radius the rasteriser tests against).
 #[cfg(target_os = "macos")]
 fn logo_s_points() -> Vec<(f32, f32)> {
-    const RX: f32 = 172.0;
-    const RY: f32 = 126.0;
-    let mut pts = Vec::with_capacity(560);
-    let mut deg = -8.0f32;
-    while deg >= -270.0 {
-        let t = deg.to_radians();
-        pts.push((512.0 + RX * t.cos(), 386.0 + RY * t.sin()));
-        deg -= 1.0;
-    }
-    let mut deg = -90.0f32;
-    while deg <= 188.0 {
-        let t = deg.to_radians();
-        pts.push((512.0 + RX * t.cos(), 638.0 + RY * t.sin()));
-        deg += 1.0;
+    const STEPS: u32 = 100;
+    let mut pts = Vec::with_capacity(LOGO_S_PATH.len() * STEPS as usize + 1);
+    for [p0, p1, p2, p3] in LOGO_S_PATH {
+        for i in 0..=STEPS {
+            let t = i as f32 / STEPS as f32;
+            let u = 1.0 - t;
+            let (a, b, c, d) = (u * u * u, 3.0 * u * u * t, 3.0 * u * t * t, t * t * t);
+            pts.push((a * p0.0 + b * p1.0 + c * p2.0 + d * p3.0, a * p0.1 + b * p1.1 + c * p2.1 + d * p3.1));
+        }
     }
     pts
 }
@@ -439,12 +451,26 @@ mod tests {
         assert!(alpha(2, 18) > 0 && alpha(2, 18) < 255); // its anti-aliased left edge
         assert_eq!(alpha(6, 6), 255); // top-left of the squircle, away from the S
         assert_eq!(alpha(29, 25), 255); // bottom-right of it
-        // The S runs through the logo's centre.
+        // The S runs through the logo's centre (its waist passes 7 units
+        // from it) and its ends are where the SVG puts them.
         assert_eq!(alpha(18, 18), 0);
-        // Every S sample lies inside the squircle, and the S is symmetric.
-        for (x, y) in logo_s_points() {
+        let pts = logo_s_points();
+        assert_eq!(pts.first().copied(), Some((668.0, 354.0)));
+        assert_eq!(pts.last().copied(), Some((348.0, 655.0)));
+        assert_eq!(pts.len(), 6 * 101);
+        // Every S sample lies inside the squircle, and the samples are
+        // dense enough for the stroke test (never more than 4 units apart).
+        for (i, (x, y)) in pts.iter().enumerate() {
             assert!(((x - 512.0).abs() / 504.0).powi(4) + ((y - 512.0).abs() / 504.0).powi(4) < 1.0);
+            if i > 0 {
+                let (px, py) = pts[i - 1];
+                assert!(((x - px).powi(2) + (y - py).powi(2)).sqrt() < 4.0, "gap at {i}");
+            }
         }
+        // The top right end of the S is cut out, the lower left corner of
+        // the squircle (below the S's tail) is not.
+        assert_eq!(alpha(22, 13), 0);
+        assert_eq!(alpha(8, 29), 255);
         assert!(rgba.chunks(4).all(|p| p[0] == 0 && p[1] == 0 && p[2] == 0));
         // Cached: the same bytes come back.
         assert_eq!(template_icon().rgba(), rgba);

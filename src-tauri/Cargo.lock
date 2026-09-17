@@ -4278,7 +4278,7 @@ dependencies = [
 
 [[package]]
 name = "socorin"
-version = "1.0.2"
+version = "1.1.0"
 dependencies = [
  "chrono",
  "glob",
@@ -4291,6 +4291,7 @@ dependencies = [
  "semver",
  "serde",
  "serde_json",
+ "sha2",
  "tauri",
  "tauri-build",
  "tauri-plugin-autostart",
@@ -4300,6 +4301,7 @@ dependencies = [
  "tauri-plugin-opener",
  "tauri-plugin-single-instance",
  "tauri-plugin-updater",
+ "tokio",
  "url",
  "windows 0.62.2",
  "windows-capture",

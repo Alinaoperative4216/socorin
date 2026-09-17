@@ -8,6 +8,7 @@ mod hotkey;
 mod macos;
 mod record;
 mod settings;
+mod share;
 mod tray;
 mod update;
 // The Windows recorder; its geometry and pacing parts are tested everywhere.
@@ -102,6 +103,7 @@ pub(crate) fn configure<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri:
         .manage(capture::AppState::default())
         .manage(record::RecordState::default())
         .manage(update::UpdateState::default())
+        .manage(share::ShareState::default())
         .on_window_event(on_window_event)
         .invoke_handler(tauri::generate_handler![
             commands::platform_info,
@@ -133,6 +135,7 @@ pub(crate) fn configure<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri:
             commands::start_recording,
             commands::stop_recording,
             commands::stop_recording_copy,
+            commands::stop_recording_upload,
             commands::cancel_recording,
             commands::recording_status,
             commands::show_settings,
@@ -141,6 +144,14 @@ pub(crate) fn configure<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri:
             commands::install_update,
             commands::dismiss_update,
             commands::update_ready,
+            commands::upload_png,
+            commands::share_history,
+            commands::delete_share,
+            commands::copy_share_link,
+            commands::reset_install_id,
+            commands::share_notice,
+            commands::share_ready,
+            commands::dismiss_share,
             commands::quit,
         ])
 }
@@ -163,6 +174,10 @@ fn on_window_event<R: tauri::Runtime>(window: &tauri::Window<R>, event: &tauri::
         // The update popover goes away when the user clicks elsewhere.
         tauri::WindowEvent::Focused(false) if window.label() == windows::UPDATE => {
             update::blurred(window.app_handle());
+        }
+        // So does the "Link copied" popover.
+        tauri::WindowEvent::Focused(false) if window.label() == windows::SHARE => {
+            share::dismiss(window.app_handle());
         }
         // The editor is closed: its screenshot need not stay in memory.
         tauri::WindowEvent::Destroyed if window.label() == windows::EDITOR => {
@@ -348,6 +363,10 @@ mod tests {
         let popover = app.get_webview_window(windows::UPDATE).unwrap();
         on_window_event(&popover.as_ref().window(), &tauri::WindowEvent::Destroyed);
         on_window_event(&popover.as_ref().window(), &tauri::WindowEvent::Focused(false));
+        assert!(state.pending.lock().unwrap().is_some());
+        windows::show_share_notice(&app).unwrap();
+        let share = app.get_webview_window(windows::SHARE).unwrap();
+        on_window_event(&share.as_ref().window(), &tauri::WindowEvent::Focused(false));
         assert!(state.pending.lock().unwrap().is_some());
 
         on_window_event(&editor, &tauri::WindowEvent::Destroyed);

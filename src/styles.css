@@ -4,7 +4,16 @@
   --text: #1d1d1f;
   --muted: #6e6e73;
   --border: #d2d2d7;
-  --accent: #0a84ff;
+  /* The plum of the logo (socorin.com's palette). `--accent` is a fill
+     that carries white text (6.75:1), `--accent-hover` its hover (7.87:1);
+     `--accent-ink` is the same plum used as text, links and focus rings on
+     the surfaces (6.2:1 on --bg); `--accent-soft` / `--accent-border` tint
+     a field that is listening for keys. */
+  --accent: #7041b5;
+  --accent-hover: #6538a6;
+  --accent-ink: #7041b5;
+  --accent-soft: #f3eef9;
+  --accent-border: #d2bfe9;
   --accent-text: #ffffff;
   --danger: #ff3b30;
   --ok: #34c759;
@@ -14,10 +23,13 @@
   --toolbar-text: #f2f2f4;
   --toolbar-muted: #9b9ba2;
   --toolbar-hover: #3a3a3e;
-  --toolbar-active: #0a84ff;
-  --toolbar-active-hover: #3d9cff;
+  /* The toolbars are always dark: the plum fill, and a lighter plum from
+     the logo's gradient for hover (4.69:1 with the white label). */
+  --toolbar-active: #7041b5;
+  --toolbar-active-hover: #8a5bcf;
   --canvas-bg: #1c1c1e;
   color-scheme: light dark;
+  accent-color: var(--accent);
 }
 
 @media (prefers-color-scheme: dark) {
@@ -29,6 +41,12 @@
     --border: #3a3a3c;
     --warn-bg: #3a3020;
     --warn-border: #7a6430;
+    /* Fills keep the plum; hover brightens instead of darkening; plum as
+       text needs to be lighter on the dark surfaces (5.2:1 on --card). */
+    --accent-hover: #8a5bcf;
+    --accent-ink: #b28fe0;
+    --accent-soft: #33264c;
+    --accent-border: #5b4489;
   }
 }
 
@@ -78,6 +96,10 @@ button {
   cursor: pointer;
 }
 
+button:hover:not(:disabled) {
+  background: var(--accent-hover);
+}
+
 button:disabled {
   opacity: 0.5;
   cursor: default;
@@ -89,10 +111,18 @@ button.secondary {
   border: 1px solid var(--border);
 }
 
+button.secondary:hover:not(:disabled) {
+  background: var(--bg);
+}
+
 button.ghost {
   background: transparent;
-  color: var(--accent);
+  color: var(--accent-ink);
   padding: 6px 8px;
+}
+
+button.ghost:hover:not(:disabled) {
+  background: var(--accent-soft);
 }
 
 button.ghost.danger {
@@ -112,7 +142,7 @@ input:not([type]) {
 }
 
 input:focus {
-  border-color: var(--accent);
+  border-color: var(--accent-ink);
 }
 
 code {
@@ -136,7 +166,7 @@ kbd {
    drawn exactly over the one the overlay showed, so Record turns into Stop
    and Cancel stays where it was. */
 .record-bar {
-  width: 400px;
+  width: 600px;
   box-sizing: border-box;
 }
 
@@ -170,6 +200,11 @@ kbd {
   color: #34c759;
 }
 
+.rec-busy {
+  color: var(--toolbar-muted);
+  animation: rec-pulse 1.2s ease-in-out infinite;
+}
+
 .tool-btn.record,
 .tool-btn.stop {
   width: 92px;
@@ -183,6 +218,10 @@ kbd {
 
 .tool-btn.stop-copy {
   width: 124px;
+}
+
+.tool-btn.stop-upload {
+  width: 138px;
 }
 
 .tool-btn.record:hover:not(:disabled),
@@ -281,13 +320,16 @@ html[data-window="welcome"] body {
   font-weight: 600;
 }
 
-/* ---------- Update popover (own window) ---------- */
+/* ---------- Update and share popovers (own windows) ---------- */
 
 /* A transparent window under the menu bar / tray icon; only the card (and
    its shadow, inside the 16 px margin that windows.rs UPDATE_MARGIN keeps
-   around it) is visible. */
+   around it) is visible. The share popover ("Link copied") is the same
+   card. */
 html[data-window="update"],
-html[data-window="update"] body {
+html[data-window="update"] body,
+html[data-window="share"],
+html[data-window="share"] body {
   background: transparent;
   overflow: hidden;
   user-select: none;
@@ -335,6 +377,57 @@ html[data-window="update"] body {
 
 .update-body .row {
   margin-top: 4px;
+}
+
+/* The link line of the share popover and of the Settings list: one line,
+   cut with an ellipsis, selectable. */
+.share-link {
+  display: block;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+.share-notice .row button {
+  white-space: nowrap;
+  padding-left: 12px;
+  padding-right: 12px;
+}
+
+.share-notice .row button.danger {
+  color: var(--danger);
+}
+
+/* Settings → Share: the remembered links. */
+.share-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.share-list li {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+}
+
+.share-list .share-meta {
+  display: block;
+  color: var(--muted);
+  font-size: 11px;
 }
 
 .progress {
@@ -494,6 +587,11 @@ html[data-window="recorder"] body {
   text-overflow: ellipsis;
 }
 
+/* "Uploading…": a status, not a complaint. */
+.inplace-toast.info {
+  background: rgba(30, 30, 34, 0.92);
+}
+
 /* ---------- Settings ---------- */
 
 .settings {
@@ -544,6 +642,11 @@ html[data-window="recorder"] body {
   margin: 0;
 }
 
+.card h3 {
+  font-size: 13px;
+  margin: 14px 0 0;
+}
+
 .card p {
   margin: 0;
   line-height: 1.45;
@@ -590,12 +693,13 @@ html[data-window="recorder"] body {
 }
 
 .hotkey-field input.recording {
-  border-color: var(--accent);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 25%, transparent);
+  background: var(--accent-soft);
+  border-color: var(--accent-border);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent-ink) 25%, transparent);
 }
 
 .hotkey-field input.recording::placeholder {
-  color: var(--accent);
+  color: var(--accent-ink);
   font-weight: 500;
   letter-spacing: normal;
 }
@@ -644,7 +748,7 @@ html[data-window="recorder"] body {
 }
 
 .copyright a {
-  color: var(--accent);
+  color: var(--accent-ink);
   text-decoration: none;
 }
 
@@ -694,6 +798,16 @@ html[data-window="recorder"] body {
   margin: 0 6px;
 }
 
+/* The logo at the head of every toolbar: a mark, not a control. */
+.toolbar-logo {
+  flex: none;
+  width: 18px;
+  height: 18px;
+  border-radius: 5px;
+  margin: 0 2px 0 1px;
+  pointer-events: none;
+}
+
 .toolbar .spacer {
   flex: 1;
 }
@@ -726,10 +840,10 @@ html[data-window="recorder"] body {
 }
 
 .tool-btn.primary {
-  background: var(--accent);
+  background: var(--toolbar-active);
 }
 
-/* Blue buttons brighten on hover instead of falling back to the grey hover. */
+/* Plum buttons brighten on hover instead of falling back to the grey hover. */
 .tool-btn.active:hover:not(:disabled),
 .tool-btn.primary:hover:not(:disabled) {
   background: var(--toolbar-active-hover);

@@ -32,6 +32,8 @@ export interface RecordingStatus {
 export interface RecordingStopped {
   /** The file went to the clipboard (Stop & copy). */
   copied: boolean;
+  /** The share link, after Stop & upload. */
+  link?: string | null;
 }
 
 /**
@@ -62,7 +64,7 @@ export interface Region {
   height: number;
 }
 
-export type AfterCapture = "editor" | "clipboard" | "save";
+export type AfterCapture = "editor" | "clipboard" | "save" | "upload";
 
 export interface Settings {
   hotkey: string;
@@ -96,6 +98,61 @@ export interface Settings {
   updateAvailable: string;
   /** Version that ran last time (an update was installed when it differs). */
   lastVersion: string;
+  /** Where "Upload & copy link" sends captures: an http(s) origin, socorin.com by default. */
+  uploadServer: string;
+  /** The random id the share server gave this install ("" until the first upload). */
+  installId: string;
+}
+
+export type ShareKind = "image" | "video";
+
+/** The answer to a finished upload (`upload_png`). */
+export interface ShareResult {
+  id: string;
+  shareUrl: string;
+  deleteToken: string;
+  /** ISO 8601, when the server removes the file. */
+  expiresAt: string;
+  kind: ShareKind;
+  mime: string;
+  size: number;
+}
+
+/** A remembered link (`share_history`), without its delete token. */
+export interface SharedLink {
+  id: string;
+  shareUrl: string;
+  expiresAt: string;
+  kind: ShareKind;
+  mime: string;
+  size: number;
+  /** Unix seconds of the upload. */
+  createdAt: number;
+}
+
+/**
+ * Why an upload did not happen: the server's error code (`file_too_large`,
+ * `rate_limited`, `storage_full`, `unsupported_type`, …) or the app's own
+ * (`network`, `server`, `invalid_response`), with the sentence to show.
+ */
+export interface ShareError {
+  code: string;
+  message: string;
+  maxBytes?: number;
+  retryAfterSeconds?: number;
+}
+
+/** What the "Link copied" popover shows (`share_notice`, event `share:notice`). */
+export type ShareNotice =
+  | { kind: "shared"; link: SharedLink; retentionDays: number }
+  | { kind: "failed"; error: ShareError };
+
+/** The sentence for a rejected share command (a `ShareError`, or any other error). */
+export function shareErrorMessage(e: unknown): string {
+  if (e && typeof e === "object" && "message" in e && typeof (e as ShareError).message === "string") {
+    return (e as ShareError).message;
+  }
+  return String(e);
 }
 
 /** What the updater is doing (`update_status`, event `update:status`). */
@@ -177,6 +234,8 @@ export const ipc = {
   stopRecording: () => invoke<void>("stop_recording"),
   /** Stop and put the file on the clipboard. */
   stopRecordingCopy: () => invoke<void>("stop_recording_copy"),
+  /** Stop, upload the file to the share server and put the link on the clipboard. */
+  stopRecordingUpload: () => invoke<void>("stop_recording_upload"),
   /** Stop and delete the file. */
   cancelRecording: () => invoke<void>("cancel_recording"),
   recordingStatus: () => invoke<RecordingStatus>("recording_status"),
@@ -199,6 +258,24 @@ export const ipc = {
   dismissUpdate: () => invoke<void>("dismiss_update"),
   /** The update popover has rendered: show its window. */
   updateReady: () => invoke<void>("update_ready"),
+  /**
+   * Uploads PNG bytes to the share server, puts the link on the clipboard
+   * and shows the popover. Rejects with a `ShareError`.
+   */
+  uploadPng: (png: Uint8Array) => invoke<ShareResult>("upload_png", png),
+  /** The remembered links, newest first. */
+  shareHistory: () => invoke<SharedLink[]>("share_history"),
+  /** "Delete from server" for a remembered link. Rejects with a `ShareError`. */
+  deleteShare: (id: string) => invoke<void>("delete_share", { id }),
+  /** Put a remembered link on the clipboard again. */
+  copyShareLink: (id: string) => invoke<void>("copy_share_link", { id }),
+  /** Forget the install id; the next upload registers a new one. */
+  resetInstallId: () => invoke<Settings>("reset_install_id"),
+  shareNotice: () => invoke<ShareNotice | null>("share_notice"),
+  /** The share popover has rendered: show its window. */
+  shareReady: () => invoke<void>("share_ready"),
+  /** Close the share popover. */
+  dismissShare: () => invoke<void>("dismiss_share"),
   quit: () => invoke<void>("quit"),
 };
 

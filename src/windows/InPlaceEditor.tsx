@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { ipc, type Settings } from "../lib/ipc";
+import { ipc, shareErrorMessage, type Settings } from "../lib/ipc";
 import { isMac } from "../lib/hotkey";
 import { AnnotationStage } from "../editor/AnnotationStage";
 import { Toolbar } from "../editor/Toolbar";
@@ -47,7 +47,7 @@ export function InPlaceEditor({ source, crop, scale, hidden, onLockChange, setti
     initialStrokeLevel: settings?.annotationStroke,
   });
   const [busy, setBusy] = useState(false);
-  const [toast, setToast] = useState<string | null>(null);
+  const [toast, setToast] = useState<{ text: string; info?: boolean } | null>(null);
   const toastTimer = useRef<number | undefined>(undefined);
   const toolbarRef = useRef<HTMLDivElement>(null);
   const [toolbarSize, setToolbarSize] = useState({ w: 0, h: 0 });
@@ -98,8 +98,8 @@ export function InPlaceEditor({ source, crop, scale, hidden, onLockChange, setti
   }, [box.left, box.top, box.width, box.height, toolbarSize]);
 
   // ---- actions ----
-  const notify = useCallback((text: string) => {
-    setToast(text);
+  const notify = useCallback((text: string, info = false) => {
+    setToast({ text, info });
     window.clearTimeout(toastTimer.current);
     toastTimer.current = window.setTimeout(() => setToast(null), 6000);
   }, []);
@@ -111,7 +111,7 @@ export function InPlaceEditor({ source, crop, scale, hidden, onLockChange, setti
       try {
         await fn();
       } catch (e) {
-        notify(String(e));
+        notify(shareErrorMessage(e));
       } finally {
         setBusy(false);
       }
@@ -145,6 +145,19 @@ export function InPlaceEditor({ source, crop, scale, hidden, onLockChange, setti
     [run, renderPng],
   );
   const edit = useCallback(() => run(async () => ipc.editPng(await renderPng())), [run, renderPng]);
+  // Upload & copy link: the overlay stays up ("Uploading…") until the link
+  // is on the clipboard; Rust's popover announces it, so the capture ends.
+  const upload = useCallback(
+    () =>
+      run(async () => {
+        const png = await renderPng();
+        notify("Uploading…", true);
+        await ipc.uploadPng(png);
+        setToast(null);
+        await ipc.endCapture();
+      }),
+    [run, renderPng, notify],
+  );
   const close = useCallback(() => void ipc.endCapture(), []);
 
   const actions = useRef({ copy, save });
@@ -167,6 +180,9 @@ export function InPlaceEditor({ source, crop, scale, hidden, onLockChange, setti
       } else if (mod && key === "e") {
         e.preventDefault();
         void edit();
+      } else if (mod && e.shiftKey && key === "u") {
+        e.preventDefault();
+        void upload();
       } else if (e.key === "Enter") {
         e.preventDefault();
         void copy();
@@ -188,7 +204,7 @@ export function InPlaceEditor({ source, crop, scale, hidden, onLockChange, setti
       window.removeEventListener("keydown", onKey);
       window.removeEventListener("dblclick", onDblClick);
     };
-  }, [handleKey, copy, save, saveAs, edit, close, tool, box.left, box.top, box.width, box.height]);
+  }, [handleKey, copy, save, saveAs, edit, upload, close, tool, box.left, box.top, box.width, box.height]);
 
   // Automated end-to-end runs (see src-tauri/src/debug.rs).
   const autoRan = useRef(false);
@@ -228,9 +244,10 @@ export function InPlaceEditor({ source, crop, scale, hidden, onLockChange, setti
           onCopy={copy}
           onSave={save}
           onSaveAs={saveAs}
+          onUpload={upload}
           onClose={close}
         />
-        {toast && <div className="inplace-toast">{toast}</div>}
+        {toast && <div className={`inplace-toast ${toast.info ? "info" : ""}`}>{toast.text}</div>}
       </div>
     </div>
   );

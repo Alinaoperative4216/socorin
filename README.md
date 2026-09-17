@@ -33,16 +33,30 @@ that site for a newer version once a day.
   text, highlight, numbered marker, pixelate; colour + stroke presets; undo/redo.
   A separate zoomable editor window is one click (or `Ctrl/⌘+E`) away.
 - Copy to clipboard, quick save to a folder with timestamped names, or save as.
-- "After capture" modes: annotate on screen, copy immediately, save immediately.
+- *Upload & copy link*: one click (or `Ctrl/⌘+Shift+U`) in the annotation
+  toolbar sends the picture, annotations included, to socorin.com and puts a
+  share link on the clipboard, announced in a small popover under the menu
+  bar / tray icon (Copy again / Delete from server). Files are kept for 60
+  days and may be 5 MB at most. *Settings → Share* lists the links you made,
+  with *Copy* and *Delete* for each, and takes another upload server (a
+  self-hosted one, or `http://localhost:3000` while developing).
+- "After capture" modes: annotate on screen, copy immediately, save
+  immediately, upload and copy the link immediately.
 - Screen recording of a region or the full screen (tray menu, hotkey, CLI).
   A region recording keeps a floating bar exactly where the Record / Cancel
   bar was, with the running time, *Stop & copy* (the video goes to the
-  clipboard as a file, ready to paste into a chat), *Stop* (reveals the file)
-  and *Cancel* (discards it). A full-screen recording shows no bar: the tray
-  icon turns red with the running time next to it, and its menu offers the
-  same three actions. macOS records with `screencapture`, Windows with the
-  built-in recorder (Windows Graphics Capture + Media Foundation, nothing to
-  install), Linux with `ffmpeg`.
+  clipboard as a file, ready to paste into a chat), *Stop & upload* (the
+  video goes to socorin.com and its link to the clipboard, same limits as
+  for pictures), *Stop* (reveals the file) and *Cancel* (discards it). A
+  full-screen recording shows no bar: the tray icon turns red with the
+  running time next to it, and its menu offers the same four actions.
+  macOS records with `screencapture`, Windows with the built-in recorder
+  (Windows Graphics Capture + Media Foundation, nothing to install), Linux
+  with `ffmpeg`. macOS writes QuickTime `.mov` files, which the share server
+  does not take: with an `ffmpeg` installed (`brew install ffmpeg`, or a
+  path under *Settings → Recording*) *Stop & upload* converts the recording
+  to `.mp4` first (no re-encoding); without one it keeps the `.mov` and says
+  so.
 - Launch at login (on by default; switch it off in Settings), single
   instance, settings window hidden in the tray.
 - Update check once a day against `https://socorin.com/version.json` (on by
@@ -60,6 +74,20 @@ that site for a newer version once a day.
   record flags are ignored until *Allow command-line triggers* is switched on
   in Settings (any local program could otherwise use the app, which holds the
   screen-recording permission, to take screenshots for it).
+
+## Privacy
+
+Nothing leaves your computer unless you ask for it. Screenshots and
+recordings are files on your disk and in your clipboard; the only network
+traffic is the daily version check (a `GET` of `version.json`, which can be
+switched off) and the uploads you start yourself with *Upload & copy link*,
+*Stop & upload* or the *upload* after-capture mode. An upload sends the
+file, its type and size, a checksum and the app's version and platform to
+the server in *Settings → Share*, plus a random install ID the server hands
+out on first use so it can hold off spam: there are no accounts, and *Reset
+install ID* discards it. Every link comes with a delete token the app keeps
+locally, so you can take a file down again from the popover or from
+*Settings → Share* before it expires.
 
 ## Development
 

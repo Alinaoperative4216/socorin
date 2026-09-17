@@ -123,6 +123,38 @@ describe("InPlaceEditor", () => {
     expect(tauri.calls("copy_png")).toHaveLength(copies + 1);
   });
 
+  it("uploads, says so meanwhile, and ends the capture once the link is copied", async () => {
+    let finish: (v: unknown) => void = () => {};
+    tauri.handlers.upload_png = () => new Promise((r) => (finish = r));
+    const { container } = mount();
+    fireEvent.click(screen.getByTitle("Upload & copy link (Ctrl/⌘+Shift+U)"));
+    await waitFor(() => expect(tauri.calls("upload_png")).toHaveLength(1));
+    expect(tauri.calls("upload_png")[0]).toBeInstanceOf(Uint8Array);
+    const toast = container.querySelector(".inplace-toast") as HTMLElement;
+    expect(toast.textContent).toBe("Uploading…");
+    expect(toast.className).toContain("info");
+    expect((screen.getByTitle("Upload & copy link (Ctrl/⌘+Shift+U)") as HTMLButtonElement).disabled).toBe(true);
+    expect(tauri.calls("cancel_capture")).toHaveLength(0);
+    finish({ id: "x", shareUrl: "https://socorin.com/s/x" });
+    await waitFor(() => expect(tauri.calls("cancel_capture")).toHaveLength(1));
+    expect(container.querySelector(".inplace-toast")).toBeNull();
+
+    // The keyboard shortcut does the same.
+    fireEvent.keyDown(window, { key: "U", shiftKey: true, ...mod });
+    await waitFor(() => expect(tauri.calls("upload_png")).toHaveLength(2));
+    finish({ id: "y", shareUrl: "https://socorin.com/s/y" });
+    await waitFor(() => expect(tauri.calls("cancel_capture")).toHaveLength(2));
+  });
+
+  it("shows the share error's own sentence and keeps the capture open", async () => {
+    tauri.handlers.upload_png = () => Promise.reject({ code: "file_too_large", message: "This capture is 7.3 MB; the share limit is 5 MB.", maxBytes: 5_242_880 });
+    const { container } = mount();
+    fireEvent.click(screen.getByTitle("Upload & copy link (Ctrl/⌘+Shift+U)"));
+    await waitFor(() => expect(container.querySelector(".inplace-toast")?.textContent).toBe("This capture is 7.3 MB; the share limit is 5 MB."));
+    expect(container.querySelector(".inplace-toast")?.className).not.toContain("info");
+    expect(tauri.calls("cancel_capture")).toHaveLength(0);
+  });
+
   it("shows a toast when an action fails and hides it later", async () => {
     vi.useFakeTimers();
     tauri.handlers.copy_png = () => Promise.reject("nope");
