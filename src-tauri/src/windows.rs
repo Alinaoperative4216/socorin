@@ -228,9 +228,9 @@ pub fn close_welcome<R: Runtime>(app: &AppHandle<R>) {
 /// draws the bar this far from the window's edges (`RECORDER_MARGIN` in
 /// `src/lib/ipc.ts` must match).
 pub const RECORDER_MARGIN: f64 = 20.0;
-/// Size the hidden window is created with (the 600 px bar plus its margin);
+/// Size the hidden window is created with (the 640 px bar plus its margin);
 /// it is resized to the measured bar on use.
-const RECORDER_DEFAULT_SIZE: (f64, f64) = (640.0, 84.0);
+const RECORDER_DEFAULT_SIZE: (f64, f64) = (680.0, 84.0);
 
 /// The floating recording bar (elapsed time, Stop & copy, Stop, Cancel).
 /// It is the same toolbar the overlay shows before recording, in its own

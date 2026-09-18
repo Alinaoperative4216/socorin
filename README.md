@@ -55,6 +55,12 @@ that site for a newer version once a day.
   for pictures), *Stop* (reveals the file) and *Cancel* (discards it). A
   full-screen recording shows no bar: the tray icon turns red with the
   running time next to it, and its menu offers the same four actions.
+  Recordings take the microphone along, unless it is switched off: the
+  Record bar has a microphone button (the switch is remembered for the next
+  takes), and *Settings → Recording* chooses the microphone — the system
+  default at the time, or one by name. While recording, the bar shows which
+  microphone is recorded, or why there is no sound (none connected, access
+  denied, the chosen one unplugged).
   macOS records with `screencapture`, Windows with the built-in recorder
   (Windows Graphics Capture + Media Foundation, nothing to install), Linux
   with `ffmpeg`. macOS writes QuickTime `.mov` files, which the share server
@@ -252,7 +258,15 @@ Two dev aids exist so the whole pipeline can be exercised automatically:
 
 - **macOS** needs the Screen Recording permission (System Settings → Privacy &
   Security → Screen Recording). The app prompts the first time; if capture
-  returns an empty image after granting, relaunch the app.
+  returns an empty image after granting, relaunch the app. A recording with
+  sound needs the Microphone permission as well: macOS asks the first time
+  one starts (`NSMicrophoneUsageDescription` in `src-tauri/Info.plist`), and
+  without it the recording runs silently and the bar says so. The
+  microphones are AVFoundation's (`screencapture -g` / `-G<id>`). Signed
+  builds run under the hardened runtime, where the microphone also needs
+  the `com.apple.security.device.audio-input` entitlement
+  (`src-tauri/Entitlements.plist`; `scripts/build-macos.sh` refuses to ship
+  an app without it).
 - **macOS: install into Applications first.** Started from the mounted `.dmg`
   (or from Gatekeeper's translocated copy) the app cannot be granted Screen
   Recording; macOS often does not even show the prompt and the app never
@@ -277,14 +291,19 @@ Two dev aids exist so the whole pipeline can be exercised automatically:
   Windows Graphics Capture and a Media Foundation H.264 encoder
   (hardware-accelerated where the GPU offers it) on Windows 10 version 1903
   or later. Windows 10 draws its capture border around the recorded display;
-  Windows 11 is asked once for borderless capture. Where the built-in
-  recorder is unavailable an installed `ffmpeg` takes over, and a path under
+  Windows 11 is asked once for borderless capture. The microphone is read
+  through WASAPI (shared mode, converted to 48 kHz stereo) into an AAC track
+  of the same MP4; Windows' privacy setting for the microphone applies.
+  Where the built-in recorder is unavailable an installed `ffmpeg` takes
+  over (the microphone then goes in through DirectShow), and a path under
   *Settings → Recording* makes `ffmpeg` the recorder outright.
 - **Recording on Linux** uses `ffmpeg`. The app looks for it in the
   usual install locations and then in the absolute entries of `PATH` (never
   the working directory); *Settings → Recording* takes an explicit path when
   it lives elsewhere (it has to be the `ffmpeg` binary itself: the setting
-  cannot point the recorder at another program). macOS records with the
+  cannot point the recorder at another program). The microphone is a
+  PulseAudio / PipeWire source: `pactl` (package `pulseaudio-utils`) lists
+  them, ffmpeg records the chosen one (`-f pulse`). macOS records with the
   system `screencapture`.
 
 ## Contributing

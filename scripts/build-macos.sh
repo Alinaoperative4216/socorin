@@ -126,6 +126,14 @@ fi
 echo "--- verification ---"
 codesign --verify --deep --strict --verbose=2 "$APP"
 codesign -dvv "$APP" 2>&1 | grep -E "^(Authority|TeamIdentifier|Timestamp)" || true
+# Under the hardened runtime the microphone needs an entitlement
+# (src-tauri/Entitlements.plist, named in tauri.conf.json): without it macOS
+# refuses the microphone without even asking, for the app and for the
+# `screencapture` it starts, and every recording would be silent.
+if ! codesign -d --entitlements - "$APP" 2>/dev/null | grep -q "com.apple.security.device.audio-input"; then
+  echo "error: $APP lacks the com.apple.security.device.audio-input entitlement; recordings would have no sound." >&2
+  exit 1
+fi
 # Expect "accepted source=Notarized Developer ID"; ad-hoc builds are rejected here.
 spctl --assess --type execute --verbose=2 "$APP" || true
 if [ "$NOTARIZE" = 1 ]; then

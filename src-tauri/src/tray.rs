@@ -48,6 +48,9 @@ pub struct TrayItems<R: Runtime> {
     recording_menu: Menu<R>,
     /// "Recording 00:12", refreshed every second.
     timer: MenuItem<R>,
+    /// "Microphone: …" / "No sound": what the running recording hears. A
+    /// full-screen recording has no bar, so this is where it is said.
+    mic: MenuItem<R>,
     /// "Update to Socorin 1.2.3…" and its separator, at the top of the idle
     /// menu while a newer version is known (`set_update_available`).
     update_item: MenuItem<R>,
@@ -159,6 +162,7 @@ fn build_items<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<TrayItems<R>> {
     )?;
 
     let timer = MenuItem::with_id(app, "timer", &timer_text(0), false, None::<&str>)?;
+    let mic = MenuItem::with_id(app, "mic", &mic_text(None, None), false, None::<&str>)?;
     // `&&`: a literal ampersand (a single `&` marks a mnemonic).
     let stop_copy_item =
         MenuItem::with_id(app, "stop_copy", "Stop && Copy to Clipboard", true, None::<&str>)?;
@@ -170,6 +174,7 @@ fn build_items<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<TrayItems<R>> {
         app,
         &[
             &timer,
+            &mic,
             &PredefinedMenuItem::separator(app)?,
             &stop_copy_item,
             &stop_upload_item,
@@ -185,6 +190,7 @@ fn build_items<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<TrayItems<R>> {
         idle_menu,
         recording_menu,
         timer,
+        mic,
         update_item,
         update_separator,
         update_shown: AtomicBool::new(false),
@@ -221,6 +227,8 @@ pub fn set_recording<R: Runtime>(app: &AppHandle<R>, on: bool) {
     };
     if on {
         let _ = items.timer.set_text(timer_text(0));
+        let status = record::status(app);
+        let _ = items.mic.set_text(mic_text(status.audio.as_deref(), status.audio_issue.as_deref()));
         let _ = tray.set_menu(Some(items.recording_menu.clone()));
         show_recording(&tray, 0);
         let app = app.clone();
@@ -284,6 +292,18 @@ fn show_idle<R: Runtime>(app: &AppHandle<R>, tray: &TrayIcon<R>) {
 /// The menu line that shows how long the recording has been running.
 pub fn timer_text(elapsed_ms: u64) -> String {
     format!("Recording {}", format_elapsed(elapsed_ms))
+}
+
+/// The menu line that says what the recording hears: the microphone's
+/// name, or that there is no sound and (briefly) why.
+pub fn mic_text(audio: Option<&str>, issue: Option<&str>) -> String {
+    match (audio, issue) {
+        (Some(name), _) => format!("Microphone: {name}"),
+        // The bar's sentence ends in "; recording without sound.": the menu
+        // already says "No sound".
+        (None, Some(issue)) => format!("No sound: {}", issue.split(';').next().unwrap_or(issue).trim()),
+        (None, None) => "Microphone off".into(),
+    }
 }
 
 /// `mm:ss`, or `h:mm:ss` from the first hour on (same as the bar).
@@ -497,6 +517,12 @@ mod tests {
         assert_eq!(format_elapsed(65_999), "01:05");
         assert_eq!(format_elapsed(3_725_000), "1:02:05");
         assert_eq!(timer_text(12_000), "Recording 00:12");
+        // What the recording hears, for the menu of a bar-less recording.
+        assert_eq!(mic_text(Some("Jabra Speak 710"), None), "Microphone: Jabra Speak 710");
+        assert_eq!(mic_text(Some("Built-in"), Some("Jabra is not connected; recording with Built-in.")), "Microphone: Built-in");
+        assert_eq!(mic_text(None, Some(crate::audio::NO_MIC)), "No sound: No microphone is connected");
+        assert_eq!(mic_text(None, Some("Access is off")), "No sound: Access is off");
+        assert_eq!(mic_text(None, None), "Microphone off");
         assert!(now_ms() > 1_700_000_000_000);
     }
 

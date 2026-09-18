@@ -64,9 +64,23 @@ describe("devmock", () => {
     expect(updated.filePrefix).toBe("X");
     expect(((await internals().invoke("get_settings")) as { filePrefix: string }).filePrefix).toBe("X");
 
-    expect(await internals().invoke("platform_info")).toEqual({ os: "macos", screenPermission: true, wayland: false, installIssue: null });
-    window.history.replaceState({}, "", "/?mock=main&noperm=1&issue=disk-image");
-    expect(await internals().invoke("platform_info")).toMatchObject({ screenPermission: false, installIssue: "disk-image" });
+    expect(await internals().invoke("platform_info")).toEqual({
+      os: "macos",
+      screenPermission: true,
+      micPermission: "granted",
+      wayland: false,
+      installIssue: null,
+    });
+    window.history.replaceState({}, "", "/?mock=main&noperm=1&issue=disk-image&mic=denied");
+    expect(await internals().invoke("platform_info")).toMatchObject({ screenPermission: false, installIssue: "disk-image", micPermission: "denied" });
+    const mics = (await internals().invoke("audio_inputs")) as { id: string; default: boolean }[];
+    expect(mics.filter((m) => m.default)).toHaveLength(1);
+    expect(await internals().invoke("open_mic_permission_settings")).toBeUndefined();
+    // The recorder's status names the microphone while the switch is on.
+    expect(await internals().invoke("recording_status")).toMatchObject({ recording: true, audio: "MacBook Pro Microphone" });
+    await internals().invoke("update_settings", { patch: { mic: false } });
+    expect(await internals().invoke("recording_status")).toMatchObject({ audio: null });
+    await internals().invoke("update_settings", { patch: { mic: true } });
     expect(await internals().invoke("default_save_dir")).toBe("/Users/mock/Pictures/Screenshots");
     expect(await internals().invoke("debug_options")).toEqual({ enabled: false, dumpDir: null, autoSelect: null, autoAction: null });
   });

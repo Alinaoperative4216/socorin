@@ -66,6 +66,8 @@ strip = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6.4"
+# The completion block of AVCaptureDevice's microphone permission request.
+block2 = "0.6"
 
 [target.'cfg(unix)'.dependencies]
 # SIGINT to the recording encoder so it finalises the file.
@@ -81,13 +83,21 @@ windows-sys = { version = "0.61", features = [
 ] }
 # The built-in recorder (wgc.rs): Windows.Graphics.Capture frames into a
 # Media Foundation H.264 encoder. `windows` (the crate windows-capture is
-# built on) for the borderless-capture request.
+# built on) for the borderless-capture request and, in audio.rs, for the
+# microphone (WASAPI: the Win32_* features).
 windows-capture = "2.0.1"
 windows = { version = "0.62", features = [
     "Foundation",
     "Foundation_Metadata",
     "Graphics_Capture",
     "Security_Authorization_AppCapabilityAccess",
+    "Win32_Devices_FunctionDiscovery",
+    "Win32_Foundation",
+    "Win32_Media_Audio",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_Variant",
+    "Win32_UI_Shell_PropertiesSystem",
 ] }
 
 [target.'cfg(target_os = "linux")'.dependencies]

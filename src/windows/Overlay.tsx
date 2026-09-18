@@ -320,6 +320,18 @@ export function Overlay({ monitorId }: { monitorId: number }) {
 
   const cancelRecording = useCallback(() => void ipc.cancelCapture(), []);
 
+  /**
+   * The Record bar's mic button: the switch is a setting (this take and the
+   * next ones), saved from here — the overlay may write that one key.
+   */
+  const toggleMic = useCallback(() => {
+    setSettings((s) => {
+      const mic = !(s ? s.mic : true);
+      ipc.updateSettings({ mic }).catch((e) => setError(String(e)));
+      return s ? { ...s, mic } : s;
+    });
+  }, []);
+
   const onLockChange = useCallback(
     (locked: boolean) => {
       if (lockedRef.current === locked) return;
@@ -623,7 +635,15 @@ export function Overlay({ monitorId }: { monitorId: number }) {
         </Suspense>
       )}
       {phase === "annotate" && mode === "record" && crop && (
-        <RecordBar crop={crop} scale={1 / sx} hidden={adjusting} onStart={startRecording} onCancel={cancelRecording} />
+        <RecordBar
+          crop={crop}
+          scale={1 / sx}
+          hidden={adjusting}
+          settings={settings}
+          onToggleMic={toggleMic}
+          onStart={startRecording}
+          onCancel={cancelRecording}
+        />
       )}
       {error && <div className="overlay-hint overlay-error">{error}</div>}
     </div>

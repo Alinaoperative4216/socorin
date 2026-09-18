@@ -9,6 +9,15 @@
 //! starting again stops the running one, stopping finalises the file,
 //! reveals it in the file manager and reports `capture-done`.
 //!
+//! The microphone goes in too unless it is switched off (Settings →
+//! Recording, or the bar's mic button): `audio::choose` picks the device,
+//! macOS asks for the permission first (`macos::ensure_mic_permission`),
+//! and the encoder gets it as `screencapture -g` / `-G<id>`, a WASAPI stream
+//! into the Media Foundation encoder, or ffmpeg's `pulse` / `dshow` input.
+//! When there is no sound after all (no microphone, no permission, a device
+//! that could not be opened) the recording still runs, without it, and the
+//! bar says why (`RecordingStatus::audio_issue`).
+//!
 //! The region is chosen on the capture overlay (`capture::Mode::Record`),
 //! which is hidden before the encoder starts so it is never in the video.
 //! While a region records, the Record / Cancel bar the overlay showed is
@@ -32,6 +41,7 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, Runtime};
 
 use crate::{
+    audio,
     capture::{self, MonitorGeom},
     clipboard, debug, settings, share, tray, windows,
 };
@@ -135,6 +145,10 @@ pub(crate) struct Active {
     pub(crate) path: PathBuf,
     pub(crate) started: Instant,
     pub(crate) started_ms: u64,
+    /// The microphone being recorded (its name), `None` for no sound.
+    pub(crate) audio: Option<String>,
+    /// Why there is no sound, or another microphone than the chosen one.
+    pub(crate) audio_issue: Option<String>,
 }
 
 /// The running encoder: a child process (macOS `screencapture`, ffmpeg) or
@@ -202,6 +216,11 @@ pub struct RecordingStatus {
     /// Unix time in ms when the recording started (0 when idle).
     pub started_ms: u64,
     pub path: String,
+    /// The microphone being recorded (its name); `None` = no sound.
+    pub audio: Option<String>,
+    /// Why there is no sound, or why another microphone than the chosen
+    /// one is recorded (the bar shows it on the mic icon).
+    pub audio_issue: Option<String>,
 }
 
 pub fn status<R: Runtime>(app: &AppHandle<R>) -> RecordingStatus {
@@ -212,11 +231,15 @@ pub fn status<R: Runtime>(app: &AppHandle<R>) -> RecordingStatus {
             recording: true,
             started_ms: a.started_ms,
             path: a.path.to_string_lossy().into_owned(),
+            audio: a.audio.clone(),
+            audio_issue: a.audio_issue.clone(),
         },
         None => RecordingStatus {
             recording: false,
             started_ms: 0,
             path: String::new(),
+            audio: None,
+            audio_issue: None,
         },
     }
 }
@@ -301,7 +324,16 @@ fn start_inner<R: Runtime>(app: &AppHandle<R>, area: Area, bar: Option<Bar>) -> 
     }
 
     let path = output_path(app)?;
-    let backend = match spawn_backend(app, &area, &path) {
+    // The microphone: on macOS this may show the permission prompt and wait
+    // for the answer, so a cancel that came in meanwhile is honoured here.
+    let mut audio = audio_choice(app);
+    if state.abort.load(Ordering::SeqCst) {
+        debug::log("recording cancelled while the microphone was being set up");
+        let _ = std::fs::remove_file(&path);
+        finish_abort(app);
+        return Ok(());
+    }
+    let backend = match spawn_backend(app, &area, &path, &mut audio) {
         Ok(backend) => backend,
         Err(e) => {
             // The name may have been reserved with an empty file.
@@ -314,15 +346,18 @@ fn start_inner<R: Runtime>(app: &AppHandle<R>, area: Area, bar: Option<Bar>) -> 
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0);
     debug::log(format!(
-        "recording {}x{} at ({}, {}) on monitor {} -> {}{}",
+        "recording {}x{} at ({}, {}) on monitor {} -> {}{}, sound: {}",
         area.width, area.height, area.x, area.y, area.monitor.id, path.display(),
-        if bar.is_some() { " (bar)" } else { " (tray only)" }
+        if bar.is_some() { " (bar)" } else { " (tray only)" },
+        describe_audio(&audio)
     ));
     *state.active.lock().unwrap() = Some(Active {
         backend,
         path,
         started: Instant::now(),
         started_ms,
+        audio: audio.input.as_ref().map(|i| i.name.clone()),
+        audio_issue: audio.issue.clone(),
     });
     if state.abort.load(Ordering::SeqCst) {
         debug::log("recording cancelled while it started");
@@ -332,6 +367,75 @@ fn start_inner<R: Runtime>(app: &AppHandle<R>, area: Area, bar: Option<Bar>) -> 
     tray::set_recording(app, true);
     let _ = app.emit("recording:started", status(app));
     Ok(())
+}
+
+/// What a recording takes as sound: the settings' choice among the
+/// microphones present (`audio::choose`), and on macOS only with the
+/// user's permission (asked for here when it never was).
+fn audio_choice<R: Runtime>(app: &AppHandle<R>) -> audio::Choice {
+    let settings = settings::current(app);
+    if !settings.mic {
+        return audio::Choice::default();
+    }
+    let choice = audio::choose(&settings, &audio::inputs());
+    #[cfg(target_os = "macos")]
+    let choice = {
+        let mut choice = choice;
+        if choice.input.is_some() {
+            if let Err(e) = crate::macos::ensure_mic_permission() {
+                choice.mute(e);
+            }
+        }
+        choice
+    };
+    if let Some(issue) = &choice.issue {
+        debug::log(format!("microphone: {issue}"));
+    }
+    choice
+}
+
+/// For the log: "MacBook Pro Microphone (default)", "none (No microphone…)".
+fn describe_audio(audio: &audio::Choice) -> String {
+    let what = match &audio.input {
+        Some(input) if audio.default => format!("{} (default)", input.name),
+        Some(input) => input.name.clone(),
+        None => "none".into(),
+    };
+    match &audio.issue {
+        Some(issue) => format!("{what} ({issue})"),
+        None => what,
+    }
+}
+
+/// `-g` (the default input) or `-G<id>` (that device): how `screencapture`
+/// takes the microphone; nothing for a silent recording.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) fn screencapture_audio_args(audio: &audio::Choice) -> Vec<String> {
+    match &audio.input {
+        None => Vec::new(),
+        Some(_) if audio.default => vec!["-g".into()],
+        Some(input) => vec![format!("-G{}", input.id)],
+    }
+}
+
+/// ffmpeg's input for the microphone, and the AAC track to encode it into:
+/// PulseAudio / PipeWire's source by name on Linux (`default` follows the
+/// system), DirectShow's device by name on Windows (it knows no default,
+/// so the default's name goes in). Nothing for a silent recording.
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+pub(crate) fn ffmpeg_audio_args(audio: &audio::Choice) -> (Vec<String>, Vec<String>) {
+    let Some(input) = &audio.input else {
+        return (Vec::new(), Vec::new());
+    };
+    let mut inputs: Vec<String> = vec!["-thread_queue_size".into(), "1024".into()];
+    if cfg!(target_os = "windows") {
+        inputs.extend(["-f".into(), "dshow".into(), "-i".into(), format!("audio={}", input.name)]);
+    } else {
+        let source = if audio.default { "default".to_string() } else { input.id.clone() };
+        inputs.extend(["-f".into(), "pulse".into(), "-i".into(), source]);
+    }
+    let codec = ["-c:a", "aac", "-b:a", "128k"].map(String::from).to_vec();
+    (inputs, codec)
 }
 
 /// A stop / cancel came in before the encoder existed: just take the bar
@@ -658,12 +762,14 @@ fn quiet() -> Stdio {
 }
 
 #[cfg(target_os = "macos")]
-fn spawn_backend<R: Runtime>(_app: &AppHandle<R>, area: &Area, path: &Path) -> Result<Backend, String> {
+fn spawn_backend<R: Runtime>(_app: &AppHandle<R>, area: &Area, path: &Path, audio: &mut audio::Choice) -> Result<Backend, String> {
     let (x, y, w, h) = area.global_logical();
     let rect = format!("{},{},{},{}", x.round(), y.round(), w.round(), h.round());
-    // -v video, -x no shutter sound, -R rectangle in global points.
+    // -v video, -x no shutter sound, -R rectangle in global points, -g / -G
+    // the microphone.
     Command::new("/usr/sbin/screencapture")
         .args(["-v", "-x", "-R", &rect])
+        .args(screencapture_audio_args(audio))
         .arg(path)
         .stdin(Stdio::null())
         .stdout(quiet())
@@ -722,11 +828,11 @@ fn ffmpeg_binary<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf, String> {
 }
 
 #[cfg(target_os = "linux")]
-fn spawn_backend<R: Runtime>(app: &AppHandle<R>, area: &Area, path: &Path) -> Result<Backend, String> {
+fn spawn_backend<R: Runtime>(app: &AppHandle<R>, area: &Area, path: &Path, audio: &mut audio::Choice) -> Result<Backend, String> {
     if windows::is_wayland() {
         return Err("Screen recording needs an X11 session; Wayland is not supported yet.".into());
     }
-    spawn_ffmpeg(app, area, path).map(Backend::Process)
+    spawn_ffmpeg(app, area, path, audio).map(Backend::Process)
 }
 
 /// The built-in recorder, unless Settings → Recording names an ffmpeg (then
@@ -734,9 +840,9 @@ fn spawn_backend<R: Runtime>(app: &AppHandle<R>, area: &Area, path: &Path) -> Re
 /// (Windows before 10 1903, no Direct3D device or Media Foundation), an
 /// installed ffmpeg takes over.
 #[cfg(target_os = "windows")]
-fn spawn_backend<R: Runtime>(app: &AppHandle<R>, area: &Area, path: &Path) -> Result<Backend, String> {
+fn spawn_backend<R: Runtime>(app: &AppHandle<R>, area: &Area, path: &Path, audio: &mut audio::Choice) -> Result<Backend, String> {
     if settings::current(app).ffmpeg_path.is_empty() {
-        match wgc::Recorder::start(area, path) {
+        match wgc::Recorder::start(area, path, audio) {
             Ok(recorder) => return Ok(Backend::Native(recorder)),
             Err(e) => {
                 eprintln!("[record] built-in recorder: {e}");
@@ -748,13 +854,14 @@ fn spawn_backend<R: Runtime>(app: &AppHandle<R>, area: &Area, path: &Path) -> Re
             }
         }
     }
-    spawn_ffmpeg(app, area, path).map(Backend::Process)
+    spawn_ffmpeg(app, area, path, audio).map(Backend::Process)
 }
 
-/// ffmpeg grabbing the area (`gdigrab` on Windows, `x11grab` on Linux) into
-/// an H.264 MP4; `q` on stdin (Windows) or SIGINT ends it cleanly.
+/// ffmpeg grabbing the area (`gdigrab` on Windows, `x11grab` on Linux),
+/// and the microphone, into an H.264 (+ AAC) MP4; `q` on stdin (Windows)
+/// or SIGINT ends it cleanly.
 #[cfg(not(target_os = "macos"))]
-fn spawn_ffmpeg<R: Runtime>(app: &AppHandle<R>, area: &Area, path: &Path) -> Result<Child, String> {
+fn spawn_ffmpeg<R: Runtime>(app: &AppHandle<R>, area: &Area, path: &Path, audio: &audio::Choice) -> Result<Child, String> {
     let binary = ffmpeg_binary(app)?;
     debug::log(format!("ffmpeg: {}", binary.display()));
     let (x, y, w, h) = area.global_physical();
@@ -775,7 +882,11 @@ fn spawn_ffmpeg<R: Runtime>(app: &AppHandle<R>, area: &Area, path: &Path) -> Res
             "-i", &format!("{display}+{x},{y}"),
         ]);
     }
-    cmd.args(["-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p", "-movflags", "+faststart"])
+    let (audio_inputs, audio_codec) = ffmpeg_audio_args(audio);
+    cmd.args(audio_inputs);
+    cmd.args(["-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p"])
+        .args(audio_codec)
+        .args(["-movflags", "+faststart"])
         .arg(path)
         .stdin(Stdio::piped())
         .stdout(quiet())
@@ -813,7 +924,72 @@ mod tests {
             path,
             started: Instant::now(),
             started_ms: 1_700_000_000_000,
+            audio: Some("Built-in Microphone".into()),
+            audio_issue: None,
         });
+    }
+
+    fn mic(id: &str, name: &str, default: bool) -> audio::Choice {
+        audio::Choice { input: Some(audio::Input { id: id.into(), name: name.into(), default }), default, issue: None }
+    }
+
+    #[test]
+    fn the_encoder_gets_the_microphone_as_its_platform_wants_it() {
+        let silent = audio::Choice::default();
+        let default = mic("builtin", "MacBook Pro Microphone", true);
+        let chosen = mic("usb:1", "Jabra Speak 710", false);
+        assert!(screencapture_audio_args(&silent).is_empty());
+        assert_eq!(screencapture_audio_args(&default), vec!["-g"]);
+        assert_eq!(screencapture_audio_args(&chosen), vec!["-Gusb:1"]);
+
+        assert_eq!(ffmpeg_audio_args(&silent), (vec![], vec![]));
+        let (inputs, codec) = ffmpeg_audio_args(&default);
+        assert_eq!(codec, vec!["-c:a", "aac", "-b:a", "128k"]);
+        let (chosen_inputs, _) = ffmpeg_audio_args(&chosen);
+        if cfg!(target_os = "windows") {
+            assert_eq!(inputs, vec!["-thread_queue_size", "1024", "-f", "dshow", "-i", "audio=MacBook Pro Microphone"]);
+            assert_eq!(chosen_inputs[5], "audio=Jabra Speak 710");
+        } else {
+            assert_eq!(inputs, vec!["-thread_queue_size", "1024", "-f", "pulse", "-i", "default"]);
+            assert_eq!(chosen_inputs[5], "usb:1");
+        }
+
+        assert_eq!(describe_audio(&silent), "none");
+        assert_eq!(describe_audio(&default), "MacBook Pro Microphone (default)");
+        assert_eq!(describe_audio(&chosen), "Jabra Speak 710");
+        let mut muted = chosen;
+        muted.mute("Microphone access is off; recording without sound.".into());
+        assert_eq!(describe_audio(&muted), "none (Microphone access is off; recording without sound.)");
+    }
+
+    /// The settings decide the sound: off means silence without a look at
+    /// the devices; on takes the default (or says why there is none). On
+    /// macOS the permission is read, never asked for, in the tests.
+    #[test]
+    fn the_sound_of_a_recording_follows_the_settings() {
+        let dir = temp_dir("record-audio-choice");
+        let app = app_with(crate::settings::Settings { mic: false, ..settings_in(&dir) });
+        assert_eq!(audio_choice(&app), audio::Choice::default());
+        // One shared app behind a lock: hand it back before taking it again.
+        drop(app);
+
+        let app = app_with(settings_in(&dir));
+        let choice = audio_choice(&app);
+        let inputs = audio::inputs();
+        #[cfg(target_os = "macos")]
+        let granted = crate::macos::mic_permission() == crate::macos::MicPermission::Granted;
+        #[cfg(not(target_os = "macos"))]
+        let granted = true;
+        if inputs.is_empty() {
+            assert_eq!(choice.issue.as_deref(), Some(audio::NO_MIC));
+            assert_eq!(choice.input, None);
+        } else if !granted {
+            assert_eq!(choice.input, None);
+            assert!(choice.issue.unwrap().contains("Microphone access"));
+        } else {
+            assert!(choice.default);
+            assert_eq!(choice.input.map(|i| i.id), inputs.iter().find(|i| i.default).or(inputs.first()).map(|i| i.id.clone()));
+        }
     }
 
     #[test]
@@ -858,11 +1034,16 @@ mod tests {
         assert_eq!(stop(&app).unwrap_err(), "not recording");
         stop_if_recording(&app);
 
+        assert_eq!((idle.audio, idle.audio_issue), (None, None));
         recording(&app, dir.join("clip.mov"));
         let live = status(&app);
         assert!(live.recording);
         assert_eq!(live.started_ms, 1_700_000_000_000);
         assert!(live.path.ends_with("clip.mov"));
+        assert_eq!(live.audio.as_deref(), Some("Built-in Microphone"));
+        let json = serde_json::to_value(&live).unwrap();
+        assert_eq!(json["audio"], "Built-in Microphone");
+        assert_eq!(json["audioIssue"], serde_json::Value::Null);
         assert!(is_recording(&app));
         assert_eq!(start(&app, Area::full(&geom(1, 0, 0, 100, 100, 1.0, true)), None).unwrap_err(), "already recording");
     }

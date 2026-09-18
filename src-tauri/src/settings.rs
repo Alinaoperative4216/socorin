@@ -48,6 +48,16 @@ pub struct Settings {
     /// usual install locations, then on PATH. Windows: empty = the built-in
     /// recorder, a path = record with that ffmpeg instead.
     pub ffmpeg_path: String,
+    /// Record the microphone along with the screen. On by default; the mic
+    /// button on the Record bar flips it as well.
+    pub mic: bool,
+    /// Which microphone: a device id from `audio::inputs`, or "" for the
+    /// system's default input at the time the recording starts (so a headset
+    /// that is plugged in is picked up without a visit to Settings).
+    pub mic_device: String,
+    /// The name that device had when it was chosen, shown while it is not
+    /// connected (its id says nothing to a person).
+    pub mic_device_name: String,
     /// The first-launch welcome dialog has been dismissed.
     pub welcome_shown: bool,
     /// Last annotation colour (#rrggbb) and stroke level (1..=5), remembered
@@ -90,6 +100,9 @@ impl Default for Settings {
             cli_triggers: false,
             file_prefix: DEFAULT_PREFIX.into(),
             ffmpeg_path: String::new(),
+            mic: true,
+            mic_device: String::new(),
+            mic_device_name: String::new(),
             welcome_shown: false,
             annotation_color: DEFAULT_COLOR.into(),
             annotation_stroke: DEFAULT_STROKE,
@@ -183,6 +196,12 @@ pub fn normalise<R: Runtime>(app: &AppHandle<R>, settings: &mut Settings) {
     }
     settings.file_prefix = sanitise_prefix(&settings.file_prefix);
     settings.ffmpeg_path = settings.ffmpeg_path.trim().to_string();
+    settings.mic_device = settings.mic_device.trim().to_string();
+    settings.mic_device_name = settings.mic_device_name.trim().to_string();
+    if settings.mic_device.is_empty() {
+        // "System default" carries no name of its own.
+        settings.mic_device_name.clear();
+    }
     let color = settings.annotation_color.trim().to_ascii_lowercase();
     let valid_color = color.len() == 7
         && color.starts_with('#')
@@ -427,6 +446,33 @@ mod app_tests {
         assert_eq!(back.after_capture, AfterCapture::Save);
         assert_eq!(back.hotkey, "F5");
         assert_eq!(back.file_prefix, DEFAULT_PREFIX);
+    }
+
+    /// Recordings take the microphone unless the user switched it off; a
+    /// settings file from before the option existed records sound too.
+    #[test]
+    fn the_microphone_is_on_and_the_system_default_unless_chosen_otherwise() {
+        let d = Settings::default();
+        assert!(d.mic);
+        assert_eq!((d.mic_device.as_str(), d.mic_device_name.as_str()), ("", ""));
+        let json = serde_json::to_value(&d).unwrap();
+        assert_eq!(json["mic"], true);
+        assert_eq!(json["micDevice"], "");
+        assert_eq!(json["micDeviceName"], "");
+        let old: Settings = serde_json::from_str(r#"{"hotkey":"F5"}"#).unwrap();
+        assert!(old.mic && old.mic_device.is_empty());
+        let chosen: Settings =
+            serde_json::from_str(r#"{"mic":false,"micDevice":" BuiltInMicrophoneDevice ","micDeviceName":" MacBook Pro Microphone "}"#).unwrap();
+        assert!(!chosen.mic);
+        let app = app();
+        let mut s = chosen;
+        normalise(app.handle(), &mut s);
+        assert_eq!(s.mic_device, "BuiltInMicrophoneDevice");
+        assert_eq!(s.mic_device_name, "MacBook Pro Microphone");
+        // Back to the system default: the remembered name goes with the id.
+        s.mic_device = " ".into();
+        normalise(app.handle(), &mut s);
+        assert_eq!((s.mic_device.as_str(), s.mic_device_name.as_str()), ("", ""));
     }
 
     #[test]

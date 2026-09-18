@@ -1,5 +1,6 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import type { Bar } from "../lib/ipc";
+import { ipc, type AudioInput, type Bar, type Settings } from "../lib/ipc";
+import { micState } from "../lib/mic";
 import type { Crop } from "./InPlaceEditor";
 import { RecordControls } from "./RecordControls";
 
@@ -9,6 +10,10 @@ interface Props {
   scale: number;
   /** The selection is being moved / resized: keep out of the way. */
   hidden: boolean;
+  /** The settings (for the microphone); null when they could not be loaded. */
+  settings: Settings | null;
+  /** The mic button: switch the sound off / on for this and later takes. */
+  onToggleMic: () => void;
   /** Start; `bar` is where this bar is, so the recording bar can take its place. */
   onStart: (bar: Bar) => void;
   onCancel: () => void;
@@ -18,12 +23,30 @@ const GAP = 8;
 
 /**
  * Record mode of the overlay: the selected area stays adjustable (handles,
- * drag to move) and this bar floats next to it with Record / Cancel.
- * Enter starts, Esc cancels.
+ * drag to move) and this bar floats next to it with the microphone
+ * button, Record and Cancel. Enter starts, Esc cancels.
  */
-export function RecordBar({ crop, scale, hidden, onStart, onCancel }: Props) {
+export function RecordBar({ crop, scale, hidden, settings, onToggleMic, onStart, onCancel }: Props) {
   const ref = useRef<HTMLDivElement>(null);
   const [size, setSize] = useState({ w: 0, h: 0 });
+  // The microphones, for the button's tooltip (which one the recording
+  // takes, whether the chosen one is connected). Listed once the bar is
+  // up, so the overlay itself stays as quick as before.
+  const [inputs, setInputs] = useState<AudioInput[] | null>(null);
+
+  useEffect(() => {
+    let live = true;
+    ipc.audioInputs()
+      .then((list) => {
+        if (live) setInputs(Array.isArray(list) ? list : []);
+      })
+      .catch(() => {
+        if (live) setInputs([]);
+      });
+    return () => {
+      live = false;
+    };
+  }, []);
 
   useLayoutEffect(() => {
     const el = ref.current;
@@ -69,10 +92,12 @@ export function RecordBar({ crop, scale, hidden, onStart, onCancel }: Props) {
     return () => window.removeEventListener("keydown", onKey);
   }, [onCancel]);
 
+  const mic = useMemo(() => micState(settings, inputs), [settings, inputs]);
+
   return (
     <div className="inplace" style={{ visibility: hidden ? "hidden" : "visible" }}>
       <div ref={ref} className="floating-toolbar" style={pos}>
-        <RecordControls phase="ready" elapsedMs={0} onRecord={start} onCancel={onCancel} />
+        <RecordControls phase="ready" elapsedMs={0} mic={mic} onToggleMic={onToggleMic} onRecord={start} onCancel={onCancel} />
       </div>
     </div>
   );

@@ -26,6 +26,19 @@ export interface RecordingStatus {
   /** Unix time in ms when the recording started (0 when idle). */
   startedMs: number;
   path: string;
+  /** The microphone being recorded (its name); null = no sound. */
+  audio?: string | null;
+  /** Why there is no sound, or why another microphone than the chosen one is recorded. */
+  audioIssue?: string | null;
+}
+
+/** One microphone, as `audio_inputs` lists them. */
+export interface AudioInput {
+  /** The platform's id for it; what `micDevice` stores. */
+  id: string;
+  name: string;
+  /** The system's default input right now. */
+  default: boolean;
 }
 
 /** Payload of `recording:stopped`. */
@@ -83,6 +96,12 @@ export interface Settings {
    * Windows: empty = the built-in recorder, a path = record with that ffmpeg.
    */
   ffmpegPath: string;
+  /** Record the microphone along with the screen (default on; the Record bar's mic button flips it). */
+  mic: boolean;
+  /** The microphone's id (`AudioInput.id`), "" = the system default at the time. */
+  micDevice: string;
+  /** The name that device had when chosen (shown while it is not connected). */
+  micDeviceName: string;
   /** The first-launch welcome dialog has been dismissed. */
   welcomeShown: boolean;
   /** Last annotation colour (#rrggbb) and stroke level (1–5), kept across captures. */
@@ -192,6 +211,8 @@ export const DOWNLOAD_URL = "https://socorin.com/#download";
 export interface PlatformInfo {
   os: string;
   screenPermission: boolean;
+  /** macOS: "granted" | "denied" | "undetermined" (never asked); elsewhere "unknown". */
+  micPermission: "granted" | "denied" | "undetermined" | "unknown";
   wayland: boolean;
   /** macOS: "disk-image" | "translocated" when this copy cannot be granted permissions. */
   installIssue: "disk-image" | "translocated" | null;
@@ -211,6 +232,10 @@ export const ipc = {
   platformInfo: () => invoke<PlatformInfo>("platform_info"),
   requestScreenPermission: () => invoke<boolean>("request_screen_permission"),
   openScreenPermissionSettings: () => invoke<void>("open_screen_permission_settings"),
+  /** macOS: Privacy & Security → Microphone. */
+  openMicPermissionSettings: () => invoke<void>("open_mic_permission_settings"),
+  /** The microphones this computer has right now. Never prompts. */
+  audioInputs: () => invoke<AudioInput[]>("audio_inputs"),
   startCapture: () => invoke<void>("start_capture"),
   startFullscreenCapture: () => invoke<void>("start_fullscreen_capture"),
   cancelCapture: () => invoke<void>("cancel_capture"),

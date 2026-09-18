@@ -10,7 +10,7 @@ beforeEach(() => {
   vi.useFakeTimers();
   vi.setSystemTime(new Date(2026, 8, 17, 12, 0, 0));
   tauri = installTauri("recorder", {
-    recording_status: () => ({ recording: true, startedMs: Date.now() - 65_000, path: "/tmp/a.mov" }),
+    recording_status: () => ({ recording: true, startedMs: Date.now() - 65_000, path: "/tmp/a.mov", audio: "Jabra Speak 710", audioIssue: null }),
   });
 });
 
@@ -26,6 +26,10 @@ describe("Recorder bar", () => {
     expect(container.querySelector(".rec-dot")?.className).toContain("live");
     await act(() => vi.advanceTimersByTimeAsync(2000));
     expect(screen.getByText("01:07")).toBeTruthy();
+    // The microphone indicator says which one is recorded.
+    const mic = screen.getByLabelText("Microphone");
+    expect(mic.getAttribute("title")).toBe("Microphone: Jabra Speak 710");
+    expect(mic.className).toContain("on");
   });
 
   it("follows reset / started / stopped and says when the file was copied", async () => {
@@ -35,9 +39,21 @@ describe("Recorder bar", () => {
     expect(screen.getByText("00:00")).toBeTruthy();
     expect(container.querySelector(".rec-dot")?.className).not.toContain("live");
 
-    act(() => tauri.emit("recording:started", { recording: true, startedMs: Date.now() - 3_725_000, path: "/tmp/b.mov" }));
+    // Before the encoder is up the microphone is not known yet.
+    expect(screen.getByLabelText("Microphone").className).toContain("unknown");
+    act(() =>
+      tauri.emit("recording:started", {
+        recording: true,
+        startedMs: Date.now() - 3_725_000,
+        path: "/tmp/b.mov",
+        audio: null,
+        audioIssue: "No microphone is connected; recording without sound.",
+      }),
+    );
     await act(() => vi.advanceTimersByTimeAsync(250));
     expect(screen.getByText("1:02:05")).toBeTruthy();
+    expect(screen.getByLabelText("Microphone").getAttribute("title")).toBe("Microphone off: No microphone is connected; recording without sound.");
+    expect(screen.getByLabelText("Microphone").className).toContain("off issue");
 
     act(() => tauri.emit("recording:stopped", { copied: true }));
     expect(screen.getByText("Copied to clipboard")).toBeTruthy();

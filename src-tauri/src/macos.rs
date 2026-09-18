@@ -1,7 +1,11 @@
-//! macOS-only helpers: screen-recording permission, window levels and the
-//! file pasteboard.
+//! macOS-only helpers: screen-recording and microphone permissions, the
+//! microphones AVFoundation knows, window levels and the file pasteboard.
 
-use std::{ffi::CString, path::Path};
+use std::{
+    ffi::{CStr, CString},
+    path::Path,
+    time::Duration,
+};
 
 use objc2::{class, msg_send, runtime::AnyObject, Encode, Encoding};
 use tauri::{AppHandle, Runtime};
@@ -115,6 +119,134 @@ pub fn request_screen_permission() -> bool {
     unsafe { CGRequestScreenCaptureAccess() }
 }
 
+// ---- microphone ----
+
+#[link(name = "AVFoundation", kind = "framework")]
+extern "C" {}
+
+/// `AVMediaTypeAudio` (the four-character code "soun").
+fn av_media_type_audio() -> *mut AnyObject {
+    unsafe { msg_send![class!(NSString), stringWithUTF8String: b"soun\0".as_ptr().cast::<std::ffi::c_char>()] }
+}
+
+/// An NSString as a Rust string; empty for nil.
+fn ns_string(obj: *mut AnyObject) -> String {
+    if obj.is_null() {
+        return String::new();
+    }
+    unsafe {
+        let utf8: *const std::ffi::c_char = msg_send![obj, UTF8String];
+        if utf8.is_null() {
+            String::new()
+        } else {
+            CStr::from_ptr(utf8).to_string_lossy().into_owned()
+        }
+    }
+}
+
+/// The microphones AVFoundation knows (input-capable audio devices: the
+/// built-in one, USB, Bluetooth and virtual ones), by `uniqueID`, which is
+/// what `screencapture -G` takes. Listing needs no permission; the names
+/// are the ones the Sound settings show.
+pub fn audio_inputs() -> Vec<crate::audio::Input> {
+    unsafe {
+        let media = av_media_type_audio();
+        let default: *mut AnyObject = msg_send![class!(AVCaptureDevice), defaultDeviceWithMediaType: media];
+        let default_id = if default.is_null() { String::new() } else { ns_string(msg_send![default, uniqueID]) };
+        let devices: *mut AnyObject = msg_send![class!(AVCaptureDevice), devicesWithMediaType: media];
+        let count: usize = if devices.is_null() { 0 } else { msg_send![devices, count] };
+        (0..count)
+            .filter_map(|i| {
+                let device: *mut AnyObject = msg_send![devices, objectAtIndex: i];
+                if device.is_null() {
+                    return None;
+                }
+                let id = ns_string(msg_send![device, uniqueID]);
+                if id.is_empty() {
+                    return None;
+                }
+                let name = ns_string(msg_send![device, localizedName]);
+                Some(crate::audio::Input {
+                    default: !default_id.is_empty() && id == default_id,
+                    name: if name.is_empty() { id.clone() } else { name },
+                    id,
+                })
+            })
+            .collect()
+    }
+}
+
+/// The microphone permission (`AVAuthorizationStatus`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MicPermission {
+    /// Never asked: the first request shows the system prompt.
+    Undetermined,
+    /// Denied by the user, or restricted by a profile.
+    Denied,
+    Granted,
+}
+
+impl MicPermission {
+    /// What `platform_info` reports.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Undetermined => "undetermined",
+            Self::Denied => "denied",
+            Self::Granted => "granted",
+        }
+    }
+}
+
+/// Asking never prompts.
+pub fn mic_permission() -> MicPermission {
+    let status: isize = unsafe { msg_send![class!(AVCaptureDevice), authorizationStatusForMediaType: av_media_type_audio()] };
+    match status {
+        3 => MicPermission::Granted,
+        0 => MicPermission::Undetermined,
+        _ => MicPermission::Denied, // 1 restricted, 2 denied
+    }
+}
+
+/// Shows the system prompt when the question is still open and waits for
+/// the answer, `timeout` at most (the recording then starts without sound
+/// and the prompt stays up for the next one). Needs the
+/// `NSMicrophoneUsageDescription` of `src-tauri/Info.plist`: without it
+/// macOS ends the process instead of asking. Never in the tests: the test
+/// binary has no Info.plist, and a prompt on a developer machine is not
+/// wanted anyway.
+pub fn request_mic_permission(timeout: Duration) -> MicPermission {
+    let status = mic_permission();
+    if status != MicPermission::Undetermined || cfg!(test) {
+        return status;
+    }
+    let (tx, rx) = std::sync::mpsc::channel::<bool>();
+    let block = block2::RcBlock::new(move |granted: objc2::runtime::Bool| {
+        let _ = tx.send(granted.as_bool());
+    });
+    unsafe {
+        let _: () = msg_send![class!(AVCaptureDevice), requestAccessForMediaType: av_media_type_audio(), completionHandler: &*block];
+    }
+    match rx.recv_timeout(timeout) {
+        Ok(true) => MicPermission::Granted,
+        Ok(false) => MicPermission::Denied,
+        Err(_) => MicPermission::Undetermined,
+    }
+}
+
+/// Said on the recording bar when the microphone may not be used.
+pub const MIC_DENIED: &str =
+    "Microphone access is off for Socorin (System Settings → Privacy & Security → Microphone); recording without sound.";
+
+/// The microphone permission for a recording that is about to start: asks
+/// (and waits up to a minute for the answer) when it has never been asked.
+pub fn ensure_mic_permission() -> Result<(), String> {
+    match request_mic_permission(Duration::from_secs(60)) {
+        MicPermission::Granted => Ok(()),
+        MicPermission::Denied => Err(MIC_DENIED.into()),
+        MicPermission::Undetermined => Err("Microphone access was not granted; recording without sound.".into()),
+    }
+}
+
 /// NSScreenSaverWindowLevel: above the menu bar, the Dock and fullscreen apps.
 pub const OVERLAY_LEVEL: isize = 1000;
 /// `screencapture -v` dims everything but the recorded area with windows at
@@ -205,5 +337,28 @@ mod more_tests {
         if let Some((x, y)) = cursor_logical() {
             assert!(x.is_finite() && y.is_finite());
         }
+    }
+
+    /// Listing microphones and reading the permission never prompt; in the
+    /// tests the request never prompts either (there is no Info.plist to
+    /// allow it), so `ensure_mic_permission` reports the status as it is.
+    #[test]
+    fn microphones_are_listed_and_the_permission_read_without_a_prompt() {
+        let inputs = audio_inputs();
+        assert!(inputs.iter().filter(|i| i.default).count() <= 1, "{inputs:?}");
+        assert!(inputs.iter().all(|i| !i.id.is_empty() && !i.name.is_empty()), "{inputs:?}");
+        assert_eq!(ns_string(std::ptr::null_mut()), "");
+        let status = mic_permission();
+        assert!(matches!(status, MicPermission::Undetermined | MicPermission::Denied | MicPermission::Granted));
+        assert_eq!(request_mic_permission(Duration::from_millis(1)), status);
+        let ensured = ensure_mic_permission();
+        match status {
+            MicPermission::Granted => assert_eq!(ensured, Ok(())),
+            MicPermission::Denied => assert_eq!(ensured.unwrap_err(), MIC_DENIED),
+            MicPermission::Undetermined => assert!(ensured.unwrap_err().contains("not granted")),
+        }
+        assert_eq!(MicPermission::Granted.as_str(), "granted");
+        assert_eq!(MicPermission::Denied.as_str(), "denied");
+        assert_eq!(MicPermission::Undetermined.as_str(), "undetermined");
     }
 }

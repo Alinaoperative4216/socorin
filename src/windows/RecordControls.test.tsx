@@ -71,4 +71,41 @@ describe("RecordControls", () => {
     expect(screen.getByText("Link copied")).toBeTruthy();
     expect((screen.getByTitle("Stop recording") as HTMLButtonElement).disabled).toBe(true);
   });
+
+  it("switches the microphone before the recording and shows it during", () => {
+    const onToggleMic = vi.fn();
+    const { rerender } = render(
+      <RecordControls phase="ready" elapsedMs={0} mic={{ on: true, name: "Jabra", issue: null }} onToggleMic={onToggleMic} />,
+    );
+    const button = screen.getByTitle("Microphone: Jabra — click to record without sound") as HTMLButtonElement;
+    expect(button.className).toContain("rec-mic on");
+    expect(button.getAttribute("aria-pressed")).toBe("true");
+    fireEvent.click(button);
+    expect(onToggleMic).toHaveBeenCalledTimes(1);
+    // The mic slot sits left of Record, so Stop lands where Record was.
+    expect(screen.getAllByRole("button").map((b) => b.textContent?.trim())).toEqual(["", "Record", "Cancel"]);
+
+    rerender(<RecordControls phase="ready" elapsedMs={0} mic={{ on: false, name: null, issue: null }} onToggleMic={onToggleMic} />);
+    const off = screen.getByTitle("Microphone off — click to record sound");
+    expect(off.className).toContain("rec-mic off");
+    expect(off.getAttribute("aria-pressed")).toBe("false");
+    rerender(<RecordControls phase="ready" elapsedMs={0} mic={{ on: true, name: "Built-in", issue: "Jabra is not connected; recording with Built-in." }} />);
+    expect(screen.getByTitle(/Jabra is not connected/).className).toContain("on issue");
+    // Not known yet (the microphones are still being listed): a plain icon.
+    rerender(<RecordControls phase="ready" elapsedMs={0} />);
+    expect(screen.getByTitle("Microphone").className).toContain("unknown");
+
+    // During the recording an indicator, not a button, with what Rust reported.
+    rerender(<RecordControls phase="recording" elapsedMs={0} mic={{ on: true, name: "Jabra", issue: null }} />);
+    const indicator = screen.getByLabelText("Microphone");
+    expect(indicator.tagName).toBe("SPAN");
+    expect(indicator.getAttribute("title")).toBe("Microphone: Jabra");
+    expect(screen.getAllByRole("button").map((b) => b.textContent?.trim())).toEqual(["Stop & copy", "Stop & upload", "Stop", "Cancel"]);
+    rerender(<RecordControls phase="recording" elapsedMs={0} mic={{ on: false, name: null, issue: "Microphone access is off." }} />);
+    expect(screen.getByLabelText("Microphone").className).toContain("off issue");
+    expect(screen.getByLabelText("Microphone").getAttribute("title")).toBe("Microphone off: Microphone access is off.");
+    rerender(<RecordControls phase="starting" elapsedMs={0} />);
+    expect(screen.getByLabelText("Microphone").className).toContain("unknown");
+    expect(screen.getByLabelText("Microphone").getAttribute("title")).toBeNull();
+  });
 });

@@ -1,6 +1,7 @@
 import type { MouseEvent as ReactMouseEvent } from "react";
-import { Check, ClipboardCopy, CloudUpload, Disc, Square, X } from "lucide-react";
+import { Check, ClipboardCopy, CloudUpload, Disc, Mic, MicOff, Square, X } from "lucide-react";
 import { anchorOf, type Anchor } from "../lib/ipc";
+import { micTitle, type MicState } from "../lib/mic";
 import { ToolbarLogo } from "../editor/Toolbar";
 
 /**
@@ -17,6 +18,13 @@ interface Props {
   phase: RecordPhase;
   /** Milliseconds recorded so far. */
   elapsedMs: number;
+  /**
+   * The microphone: before the recording, what the settings say (a button
+   * that flips them); during it, what Rust reported (an indicator). Absent
+   * while unknown (the bar is up before the encoder has started).
+   */
+  mic?: MicState;
+  onToggleMic?: () => void;
   onRecord?: () => void;
   onStop?: () => void;
   onStopCopy?: () => void;
@@ -33,16 +41,24 @@ export function formatElapsed(ms: number): string {
   return `${h ? `${h}:` : ""}${p(Math.floor((s % 3600) / 60))}:${p(s % 60)}`;
 }
 
+/** The mic icon's look: on, off, or on with something to say. */
+function micClass(mic: MicState | undefined): string {
+  if (!mic) return "rec-mic unknown";
+  return `rec-mic ${mic.on ? "on" : "off"}${mic.issue ? " issue" : ""}`;
+}
+
 /**
  * The recording toolbar. One component draws it before the recording (on
  * the overlay) and during it (in its own window placed at the same spot),
  * with a fixed width and fixed button slots, so nothing moves between the
- * two: Record becomes Stop, Cancel stays Cancel.
+ * two: Record becomes Stop, Cancel stays Cancel, and the microphone button
+ * becomes the microphone indicator.
  */
-export function RecordControls({ phase, elapsedMs, onRecord, onStop, onStopCopy, onStopUpload, onCancel }: Props) {
+export function RecordControls({ phase, elapsedMs, mic, onToggleMic, onRecord, onStop, onStopCopy, onStopUpload, onCancel }: Props) {
   // Buttons must not take keyboard focus (Enter / Esc are handled by the owner).
   const stopFocus = (e: ReactMouseEvent) => e.preventDefault();
   const busy = phase === "stopping" || phase === "uploading" || phase === "copied" || phase === "shared";
+  const MicIcon = mic && !mic.on ? MicOff : Mic;
 
   return (
     <div className={`toolbar floating record-bar phase-${phase}`} onMouseDown={stopFocus}>
@@ -71,6 +87,15 @@ export function RecordControls({ phase, elapsedMs, onRecord, onStop, onStopCopy,
         <span className="spacer" />
         {phase === "ready" ? (
           <>
+            <button
+              type="button"
+              className={`tool-btn ${micClass(mic)}`}
+              title={mic ? micTitle(mic, true) : "Microphone"}
+              aria-pressed={mic ? mic.on : undefined}
+              onClick={onToggleMic}
+            >
+              <MicIcon size={16} />
+            </button>
             <button type="button" className="tool-btn wide record" title="Start recording (Enter)" onClick={onRecord}>
               <Disc size={16} /> Record
             </button>
@@ -80,6 +105,9 @@ export function RecordControls({ phase, elapsedMs, onRecord, onStop, onStopCopy,
           </>
         ) : (
           <>
+            <span className={micClass(mic)} title={mic ? micTitle(mic, false) : undefined} role="img" aria-label="Microphone">
+              <MicIcon size={16} />
+            </span>
             <button
               type="button"
               className="tool-btn wide stop-copy"

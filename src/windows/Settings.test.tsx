@@ -9,6 +9,7 @@ let tauri: TauriMock;
 const platform = (extra: Partial<PlatformInfo> = {}): PlatformInfo => ({
   os: "macos",
   screenPermission: true,
+  micPermission: "granted",
   wayland: false,
   installIssue: null,
   ...extra,
@@ -22,8 +23,14 @@ beforeEach(() => {
     default_save_dir: () => "/Users/me/Pictures/Screenshots",
     update_status: () => UPDATE_STATUS,
     share_history: () => [],
+    audio_inputs: () => MICS,
   });
 });
+
+const MICS = [
+  { id: "builtin", name: "MacBook Pro Microphone", default: true },
+  { id: "usb:1", name: "Jabra Speak 710", default: false },
+];
 
 const LINK = {
   id: "med-0123456789abcdefgh",
@@ -233,6 +240,68 @@ describe("Settings window", () => {
     expect(screen.getByPlaceholderText("Built-in recorder")).toBeTruthy();
     expect(screen.getByText("ffmpeg.exe")).toBeTruthy();
     expect(screen.queryByText(/Screen recording uses ffmpeg/)).toBeNull();
+    expect(screen.getByText(/read through WASAPI/)).toBeTruthy();
+    expect(screen.queryByText(/asks for microphone access/)).toBeNull();
+  });
+
+  it("lists the microphones, keeps an unplugged choice and saves the switch", async () => {
+    const { container } = await mountLoaded();
+    const micSwitch = screen.getByLabelText("Record the microphone") as HTMLInputElement;
+    expect(micSwitch.checked).toBe(true);
+    const select = () => container.querySelector("select") as HTMLSelectElement;
+    await waitFor(() => expect(select().options).toHaveLength(3));
+    expect(Array.from(select().options).map((o) => o.textContent)).toEqual([
+      "System default (MacBook Pro Microphone)",
+      "MacBook Pro Microphone",
+      "Jabra Speak 710",
+    ]);
+    expect(select().value).toBe("");
+    expect(select().disabled).toBe(false);
+    expect(screen.getByText(/asks for microphone access the first time/)).toBeTruthy();
+    expect(screen.queryByText(/No microphone is connected/)).toBeNull();
+    expect(screen.queryByText(/Microphone access is off/)).toBeNull();
+
+    // Choosing one remembers its name too, so it can be shown while unplugged.
+    fireEvent.change(select(), { target: { value: "usb:1" } });
+    vi.useFakeTimers();
+    fireEvent.click(saveButton());
+    await act(() => vi.advanceTimersByTimeAsync(1));
+    const patch = (tauri.calls("update_settings")[0] as { patch: Record<string, unknown> }).patch;
+    expect(patch).toMatchObject({ mic: true, micDevice: "usb:1", micDeviceName: "Jabra Speak 710" });
+    vi.useRealTimers();
+
+    // Off: the list is greyed out.
+    fireEvent.click(micSwitch);
+    expect(micSwitch.checked).toBe(false);
+    expect(select().disabled).toBe(true);
+    fireEvent.click(micSwitch);
+    expect(select().disabled).toBe(false);
+
+    // The list is refreshed when the window comes back (a headset plugged in).
+    tauri.handlers.audio_inputs = () => [];
+    act(() => window.dispatchEvent(new Event("focus")));
+    await screen.findByText(/No microphone is connected/);
+    expect(select().options[0].textContent).toBe("System default");
+  });
+
+  it("keeps a chosen microphone that is not connected, and points at the permission when it is off", async () => {
+    tauri.handlers.get_settings = () => ({ ...SETTINGS, micDevice: "gone", micDeviceName: "Old Headset" });
+    tauri.handlers.platform_info = () => platform({ micPermission: "denied" });
+    const { container } = await mountLoaded();
+    const select = container.querySelector("select") as HTMLSelectElement;
+    await waitFor(() => expect(select.options).toHaveLength(4));
+    expect(select.value).toBe("gone");
+    expect(select.options[3].textContent).toBe("Old Headset (not connected)");
+    await screen.findByText(/Microphone access is off for Socorin/);
+    fireEvent.click(screen.getByText("Open System Settings"));
+    expect(tauri.calls("open_mic_permission_settings")).toHaveLength(1);
+    // Back to the system default: no name to remember.
+    fireEvent.change(select, { target: { value: "" } });
+    vi.useFakeTimers();
+    fireEvent.click(saveButton());
+    await act(() => vi.advanceTimersByTimeAsync(1));
+    const patch = (tauri.calls("update_settings")[0] as { patch: Record<string, unknown> }).patch;
+    expect(patch).toMatchObject({ micDevice: "", micDeviceName: "" });
   });
 
   it("describes ffmpeg on Linux and the MP4 conversion on macOS", async () => {
@@ -240,6 +309,7 @@ describe("Settings window", () => {
     const { unmount } = await mountLoaded();
     await screen.findByText(/Screen recording uses ffmpeg/);
     expect(screen.getByPlaceholderText("Found automatically")).toBeTruthy();
+    expect(screen.getByText(/listed with pactl/)).toBeTruthy();
     unmount();
 
     tauri.handlers.platform_info = () => platform();

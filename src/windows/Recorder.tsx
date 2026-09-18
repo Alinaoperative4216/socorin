@@ -2,15 +2,17 @@ import { useEffect, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { ipc, RECORDER_MARGIN, type RecordingStatus, type RecordingStopped } from "../lib/ipc";
 import type { Anchor } from "../lib/ipc";
+import { micStateOf } from "../lib/mic";
 import { RecordControls, type RecordPhase } from "./RecordControls";
 
 /**
  * The floating bar shown while a region records: its own small transparent
  * always-on-top window that Rust puts exactly where the overlay's Record
  * bar was, so the buttons stay put. Shows the elapsed time and
- * Stop & copy / Stop & upload / Stop / Cancel; says "Copied to clipboard"
- * or "Link copied" for a moment after Stop & copy / Stop & upload, and
- * "Uploading…" while the file is on its way.
+ * Stop & copy / Stop & upload / Stop / Cancel, and the microphone
+ * indicator (which one is recorded, or why none is); says "Copied to
+ * clipboard" or "Link copied" for a moment after Stop & copy / Stop &
+ * upload, and "Uploading…" while the file is on its way.
  */
 export function Recorder() {
   const [status, setStatus] = useState<RecordingStatus | null>(null);
@@ -64,6 +66,7 @@ export function Recorder() {
         <RecordControls
           phase={phase}
           elapsedMs={elapsed}
+          mic={status ? micStateOf(status) : undefined}
           onStop={stop(ipc.stopRecording)}
           onStopCopy={stop(ipc.stopRecordingCopy)}
           onStopUpload={stop(ipc.stopRecordingUpload)}

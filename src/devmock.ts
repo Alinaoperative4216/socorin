@@ -17,6 +17,9 @@ let settings = {
   cliTriggers: false,
   filePrefix: "Socorin",
   ffmpegPath: "",
+  mic: true,
+  micDevice: "",
+  micDeviceName: "",
   welcomeShown: true,
   annotationColor: "#ff3b30",
   annotationStroke: 3,
@@ -148,11 +151,22 @@ const handlers: Record<string, Handler> = {
   },
   debug_options: async () => ({ enabled: false, dumpDir: null, autoSelect: null, autoAction: null }),
   debug_log: async (args) => console.log("[mock] debug_log", (args as { message: string }).message),
-  // `?mock=main&noperm=1&issue=disk-image` exercises the warning cards.
+  // `?mock=main&noperm=1&issue=disk-image&mic=denied` exercises the warning cards.
   platform_info: async () => {
     const q = new URLSearchParams(location.search);
-    return { os: "macos", screenPermission: !q.get("noperm"), wayland: false, installIssue: q.get("issue") ?? null };
+    return {
+      os: "macos",
+      screenPermission: !q.get("noperm"),
+      micPermission: q.get("mic") ?? "granted",
+      wayland: false,
+      installIssue: q.get("issue") ?? null,
+    };
   },
+  audio_inputs: async () => [
+    { id: "BuiltInMicrophoneDevice", name: "MacBook Pro Microphone", default: true },
+    { id: "AppleUSBAudioEngine:Jabra:2", name: "Jabra Speak 710", default: false },
+  ],
+  open_mic_permission_settings: async () => console.log("[mock] open_mic_permission_settings"),
   get_settings: async () => settings,
   update_settings: async (args) => {
     settings = { ...settings, ...(args as { patch: Partial<typeof settings> }).patch };
@@ -176,7 +190,13 @@ const handlers: Record<string, Handler> = {
   stop_recording_copy: async () => console.log("[mock] stop_recording_copy"),
   cancel_recording: async () => console.log("[mock] cancel_recording"),
   stop_recording_upload: async (args) => console.log("[mock] stop_recording_upload", JSON.stringify(args)),
-  recording_status: async () => ({ recording: true, startedMs: Date.now() - 65_000, path: "/Users/mock/Pictures/Screenshots/Screenshot.mov" }),
+  recording_status: async () => ({
+    recording: true,
+    startedMs: Date.now() - 65_000,
+    path: "/Users/mock/Pictures/Screenshots/Screenshot.mov",
+    audio: settings.mic ? "MacBook Pro Microphone" : null,
+    audioIssue: null,
+  }),
   upload_png: async (args) => {
     console.log("[mock] upload_png", (args as ArrayBuffer).byteLength, "bytes");
     await new Promise((r) => setTimeout(r, 1200));

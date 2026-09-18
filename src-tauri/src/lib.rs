@@ -1,3 +1,4 @@
+mod audio;
 mod capture;
 mod clipboard;
 mod commands;
@@ -130,6 +131,8 @@ pub(crate) fn configure<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri:
             commands::default_save_dir,
             commands::open_save_dir,
             commands::open_screen_permission_settings,
+            commands::open_mic_permission_settings,
+            commands::audio_inputs,
             commands::start_record_region,
             commands::start_record_fullscreen,
             commands::start_recording,

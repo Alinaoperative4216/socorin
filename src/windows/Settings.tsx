@@ -2,7 +2,15 @@ import { useCallback, useEffect, useRef, useState, type KeyboardEvent } from "re
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { ipc, shareErrorMessage, type PlatformInfo, type Settings as SettingsModel, type SharedLink, type UpdateStatus } from "../lib/ipc";
+import {
+  ipc,
+  shareErrorMessage,
+  type AudioInput,
+  type PlatformInfo,
+  type Settings as SettingsModel,
+  type SharedLink,
+  type UpdateStatus,
+} from "../lib/ipc";
 import { isMac, prettyShortcut, shortcutFromEvent } from "../lib/hotkey";
 
 type Status = { kind: "ok" | "error"; text: string } | null;
@@ -96,6 +104,7 @@ export function Settings() {
   const [checking, setChecking] = useState(false);
   const [links, setLinks] = useState<SharedLink[]>([]);
   const [busyLink, setBusyLink] = useState<string | null>(null);
+  const [mics, setMics] = useState<AudioInput[]>([]);
   const statusTimer = useRef<number | undefined>(undefined);
   const dirtyRef = useRef(false);
   dirtyRef.current = dirty;
@@ -116,10 +125,19 @@ export function Settings() {
       .catch(() => {});
   }, []);
 
+  // Microphones come and go (a headset plugged in): listed again whenever
+  // the window gets the focus.
+  const refreshMics = useCallback(() => {
+    ipc.audioInputs()
+      .then((list) => setMics(Array.isArray(list) ? list : []))
+      .catch(() => {});
+  }, []);
+
   useEffect(() => {
     ipc.getSettings().then(setSettings).catch((e) => flash({ kind: "error", text: String(e) }));
     refreshPlatform();
     refreshLinks();
+    refreshMics();
     ipc.updateStatus().then(setUpdateInfo).catch(() => {});
     const unlisten = [
       listen("screen-permission-missing", () => {
@@ -139,6 +157,7 @@ export function Settings() {
     const onFocus = () => {
       refreshPlatform();
       refreshLinks();
+      refreshMics();
       // Other windows (overlay, welcome) save settings too; this window is
       // created hidden at startup, so its copy may be stale by the time it
       // is shown. Only reload while nothing is being edited here.
@@ -149,7 +168,7 @@ export function Settings() {
       unlisten.forEach((p) => p.then((f) => f()));
       window.removeEventListener("focus", onFocus);
     };
-  }, [flash, refreshPlatform, refreshLinks]);
+  }, [flash, refreshPlatform, refreshLinks, refreshMics]);
 
   const update = (patch: Partial<SettingsModel>) => {
     setSettings((s) => (s ? { ...s, ...patch } : s));
@@ -172,6 +191,9 @@ export function Settings() {
         cliTriggers,
         filePrefix,
         ffmpegPath,
+        mic,
+        micDevice,
+        micDeviceName,
         checkUpdates,
         autoUpdate,
         uploadServer,
@@ -187,6 +209,9 @@ export function Settings() {
         cliTriggers,
         filePrefix,
         ffmpegPath,
+        mic,
+        micDevice,
+        micDeviceName,
         checkUpdates,
         autoUpdate,
         uploadServer,
@@ -262,6 +287,12 @@ export function Settings() {
   }
 
   const needsPermission = platform?.os === "macos" && !platform.screenPermission;
+  const micDenied = platform?.os === "macos" && platform.micPermission === "denied";
+  // The chosen microphone is not connected right now: keep it selectable
+  // under its remembered name rather than silently showing another one.
+  const micMissing = settings.micDevice !== "" && !mics.some((m) => m.id === settings.micDevice);
+  const defaultMic = mics.find((m) => m.default) ?? mics[0];
+  const chooseMic = (id: string) => update({ micDevice: id, micDeviceName: mics.find((m) => m.id === id)?.name ?? "" });
   const installing = updateInfo?.phase.phase === "installing";
   const updateLine = !updateInfo
     ? ""
@@ -414,6 +445,43 @@ export function Settings() {
       {platform && (
         <section className="card">
           <h2>Recording</h2>
+          <label className="checkbox">
+            <input type="checkbox" checked={settings.mic} onChange={(e) => update({ mic: e.target.checked })} />
+            <span>Record the microphone</span>
+          </label>
+          <label className="field">
+            <span>Microphone</span>
+            <select value={settings.micDevice} disabled={!settings.mic} onChange={(e) => chooseMic(e.target.value)}>
+              <option value="">{defaultMic ? `System default (${defaultMic.name})` : "System default"}</option>
+              {mics.map((m) => (
+                <option key={m.id} value={m.id}>
+                  {m.name}
+                </option>
+              ))}
+              {micMissing && (
+                <option value={settings.micDevice}>{`${settings.micDeviceName || "Chosen microphone"} (not connected)`}</option>
+              )}
+            </select>
+          </label>
+          {settings.mic && mics.length === 0 && <p className="hint">No microphone is connected; recordings have no sound until one is.</p>}
+          {micDenied && (
+            <p className="hint warning-text">
+              Microphone access is off for Socorin, so recordings have no sound. Allow it under System Settings → Privacy
+              &amp; Security → Microphone.{" "}
+              <button type="button" className="ghost" onClick={() => ipc.openMicPermissionSettings()}>
+                Open System Settings
+              </button>
+            </p>
+          )}
+          <p className="hint">
+            The Record bar has a microphone button, so the sound can be switched off (or on) for the next take without
+            coming here.{" "}
+            {platform.os === "macos"
+              ? "macOS asks for microphone access the first time a recording with sound starts."
+              : platform.os === "windows"
+                ? "The microphone is read through WASAPI; Windows' privacy setting for the microphone applies."
+                : "The microphone is a PulseAudio / PipeWire source, listed with pactl."}
+          </p>
           <label className="field">
             <span>ffmpeg</span>
             <input

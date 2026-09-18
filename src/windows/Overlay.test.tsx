@@ -360,6 +360,26 @@ describe("Overlay: full screen, automation and recording", () => {
     expect(tauri.calls("cancel_capture")).toHaveLength(1);
   });
 
+  it("switches the microphone from the Record bar and saves the switch", async () => {
+    tauri.handlers.audio_inputs = () => [{ id: "builtin", name: "MacBook Pro Microphone", default: true }];
+    tauri.handlers.update_settings = (args) => ({ ...SETTINGS, ...(args as { patch: object }).patch });
+    await startSession({ mode: "record" });
+    await drag(100, 100, 300, 250);
+    const button = await screen.findByTitle("Microphone: MacBook Pro Microphone — click to record without sound");
+    fireEvent.click(button);
+    // Only the switch is saved from here (the overlay may write that key).
+    expect(tauri.calls("update_settings")).toEqual([{ patch: { mic: false } }]);
+    expect(screen.getByTitle("Microphone off — click to record sound")).toBeTruthy();
+    fireEvent.click(screen.getByTitle("Microphone off — click to record sound"));
+    expect(tauri.calls("update_settings")).toEqual([{ patch: { mic: false } }, { patch: { mic: true } }]);
+    await screen.findByTitle("Microphone: MacBook Pro Microphone — click to record without sound");
+
+    // A save that is refused is shown, like a recording that cannot start.
+    tauri.handlers.update_settings = () => Promise.reject("overlay-1 may not change mic.");
+    fireEvent.click(screen.getByTitle(/Microphone: MacBook Pro Microphone/));
+    await screen.findByText("overlay-1 may not change mic.");
+  });
+
   it("shows why a recording could not start", async () => {
     tauri.handlers.start_recording = () => Promise.reject("ffmpeg missing");
     await startSession({ mode: "record" });

@@ -27,7 +27,7 @@ async function boot(label: string, search = "") {
   window.history.replaceState({}, "", `/${search}`);
   tauri = installTauri(label, {
     get_settings: () => SETTINGS,
-    platform_info: () => ({ os: "macos", screenPermission: true, wayland: false, installIssue: null }),
+    platform_info: () => ({ os: "macos", screenPermission: true, micPermission: "granted", wayland: false, installIssue: null }),
     overlay_info: () => Promise.reject("idle"),
     pending_image: () => Promise.reject("no image"),
     recording_status: () => ({ recording: false, startedMs: 0, path: "" }),

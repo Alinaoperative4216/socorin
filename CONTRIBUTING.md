@@ -71,11 +71,17 @@ Rust
   permission prompt), `capture_monitors` (screen grab), `focus_overlay` /
   `begin_annotation` / `show_welcome` / `welcome_ready` (steals focus),
   `copy_png` with a valid PNG (overwrites the clipboard), `save_png_as`,
-  `open_save_dir`, `open_screen_permission_settings`, `record::start` with
-  a valid area, `wgc::Recorder::start` (Windows: records the screen),
-  `record::stop` on a non-empty file (opens Finder), `tray::create`,
-  `quit`. Use the guarded paths instead (a busy session, an injected
-  `record::Active`, an unknown monitor).
+  `open_save_dir`, `open_screen_permission_settings`,
+  `open_mic_permission_settings` (macOS: opens System Settings),
+  `record::start` with a valid area, `wgc::Recorder::start` (Windows:
+  records the screen), `audio::wasapi::Capture::open` (Windows: opens the
+  microphone), `record::stop` on a non-empty file (opens Finder),
+  `tray::create`, `quit`. Use the guarded paths instead (a busy session,
+  an injected `record::Active`, an unknown monitor). Listing microphones
+  (`audio::inputs`) and reading the microphone permission are fine: they
+  never prompt, and `macos::request_mic_permission` does not ask under
+  `cfg(test)` (the test binary has no `NSMicrophoneUsageDescription`, so
+  macOS would end it).
 - The share tests (`share.rs`, and `record::stop_with(Outcome::Upload)`)
   talk to a fake server on `127.0.0.1` (`share::tests::serve` /
   `share::tests::Fake`, which speaks the whole upload protocol) that the

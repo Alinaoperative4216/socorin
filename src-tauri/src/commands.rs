@@ -8,6 +8,7 @@ use tauri::{
 use tauri_plugin_autostart::ManagerExt;
 
 use crate::{
+    audio,
     capture::{self, AppState, MonitorInfo, Region},
     debug,
     hotkey,
@@ -21,6 +22,9 @@ use crate::{
 pub struct PlatformInfo {
     pub os: &'static str,
     pub screen_permission: bool,
+    /// macOS: "granted" / "denied" / "undetermined" (never asked yet).
+    /// Elsewhere "unknown": Windows and Linux have no question to read.
+    pub mic_permission: &'static str,
     pub wayland: bool,
     /// macOS: "disk-image" / "translocated" when this copy of the app cannot
     /// be granted permissions (see `macos::install_issue`).
@@ -35,6 +39,10 @@ pub fn platform_info() -> PlatformInfo {
         screen_permission: crate::macos::has_screen_permission(),
         #[cfg(not(target_os = "macos"))]
         screen_permission: true,
+        #[cfg(target_os = "macos")]
+        mic_permission: crate::macos::mic_permission().as_str(),
+        #[cfg(not(target_os = "macos"))]
+        mic_permission: "unknown",
         wayland: cfg!(target_os = "linux")
             && std::env::var("XDG_SESSION_TYPE")
                 .map(|v| v.eq_ignore_ascii_case("wayland"))
@@ -284,14 +292,16 @@ pub fn get_settings<R: Runtime>(app: AppHandle<R>) -> Settings {
 
 /// The settings a window other than the settings window may write. The
 /// annotation style is saved by the editor and by the in-place editor on the
-/// overlay as the user picks a colour or a stroke; nothing else is any
-/// window's business. The settings window (`windows::MAIN`) owns them all.
+/// overlay as the user picks a colour or a stroke, and the overlay's Record
+/// bar switches the microphone on and off; nothing else is any window's
+/// business. The settings window (`windows::MAIN`) owns them all.
 ///
 /// Without this, one `update_settings` call from any page could turn on the
 /// command-line triggers, switch "after capture" to Upload or point
 /// `uploadServer` somewhere else — settings that decide whether captures
-/// leave the machine.
-const STYLE_KEYS: [&str; 2] = ["annotationColor", "annotationStroke"];
+/// leave the machine. (Which microphone is recorded stays with the settings
+/// window too; the bar only says whether.)
+const SHARED_KEYS: [&str; 3] = ["annotationColor", "annotationStroke", "mic"];
 
 /// Partial update: only the keys present in `patch` change, so each window
 /// can save the settings it owns without clobbering the others'. Returns the
@@ -313,7 +323,7 @@ pub(crate) fn apply_settings<R: Runtime>(
     patch: serde_json::Map<String, serde_json::Value>,
 ) -> Result<Settings, String> {
     if label != windows::MAIN {
-        if let Some(key) = patch.keys().find(|k| !STYLE_KEYS.contains(&k.as_str())) {
+        if let Some(key) = patch.keys().find(|k| !SHARED_KEYS.contains(&k.as_str())) {
             return Err(format!("{label} may not change {key}."));
         }
     }
@@ -401,6 +411,30 @@ pub fn open_save_dir<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
     let dir = settings::save_dir(&app);
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     tauri_plugin_opener::open_path(dir, None::<&str>).map_err(|e| e.to_string())
+}
+
+/// The microphones this computer has right now (Settings → Recording's
+/// list, and the Record bar's tooltip). Never prompts.
+#[tauri::command]
+pub fn audio_inputs() -> Vec<audio::Input> {
+    audio::inputs()
+}
+
+/// macOS: jump straight to Privacy & Security → Microphone.
+#[tauri::command]
+pub fn open_mic_permission_settings() -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        tauri_plugin_opener::open_url(
+            "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone",
+            None::<&str>,
+        )
+        .map_err(|e| e.to_string())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Ok(())
+    }
 }
 
 /// macOS: jump straight to Privacy & Security → Screen Recording.
@@ -613,6 +647,41 @@ mod tests {
         assert_eq!(info.install_issue, None);
         let json = serde_json::to_value(&info).unwrap();
         assert!(json.get("screenPermission").is_some());
+        let mic = json["micPermission"].as_str().unwrap();
+        if cfg!(target_os = "macos") {
+            assert!(["granted", "denied", "undetermined"].contains(&mic), "{mic}");
+        } else {
+            assert_eq!(mic, "unknown");
+        }
+    }
+
+    /// The microphone list is the platform's, through the IPC layer too;
+    /// the overlay may switch the microphone on or off, but only the
+    /// settings window may say which one.
+    #[test]
+    fn microphones_are_listed_and_only_the_switch_is_shared() {
+        let dir = temp_dir("cmd-mic");
+        let app = app_with(settings_in(&dir));
+        let handle = app.handle().clone();
+        let listed = audio_inputs();
+        assert_eq!(listed, audio::inputs());
+        let res = invoke(&handle, "audio_inputs", InvokeBody::default(), &[]).unwrap();
+        let json = res.deserialize::<serde_json::Value>().unwrap();
+        assert_eq!(json.as_array().map(|a| a.len()), Some(listed.len()));
+
+        let updated = apply_settings(&handle, "overlay-1", patch(json!({ "mic": false }))).unwrap();
+        assert!(!updated.mic);
+        assert!(!get_settings(handle.clone()).mic);
+        let err = apply_settings(&handle, "overlay-1", patch(json!({ "micDevice": "usb:1" }))).unwrap_err();
+        assert!(err.contains("may not change micDevice"), "{err}");
+        let updated = apply_settings(
+            &handle,
+            windows::MAIN,
+            patch(json!({ "mic": true, "micDevice": " usb:1 ", "micDeviceName": "Jabra" })),
+        )
+        .unwrap();
+        assert!(updated.mic);
+        assert_eq!((updated.mic_device.as_str(), updated.mic_device_name.as_str()), ("usb:1", "Jabra"));
     }
 
     #[test]
@@ -656,6 +725,8 @@ mod tests {
             path: std::path::PathBuf::from("/nonexistent/x.mov"),
             started: std::time::Instant::now(),
             started_ms: 1,
+            audio: None,
+            audio_issue: None,
         });
         assert!(recording_status(handle.clone()).recording);
         start_record_fullscreen(handle.clone()); // toggles: stops the recording
@@ -777,6 +848,11 @@ mod tests {
         debug_log("hello".into());
         show_settings(handle.clone());
         assert!(request_screen_permission_is_platform_specific());
+        // Not on macOS there is nothing to open; on macOS the URL scheme is
+        // handed to the system (no window, no prompt).
+        if !cfg!(target_os = "macos") {
+            assert_eq!(open_mic_permission_settings(), Ok(()));
+        }
         let res = invoke(&handle, "platform_info", InvokeBody::default(), &[]).unwrap();
         assert!(res.deserialize::<serde_json::Value>().unwrap().get("os").is_some());
     }

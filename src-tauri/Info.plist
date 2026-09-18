@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- Merged into the bundle's Info.plist and embedded in dev binaries by
+	     tauri-build. macOS refuses (and kills) an app that asks for the
+	     microphone without this text; it is shown in the permission prompt. -->
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Socorin records the microphone along with the screen when a recording has sound. Switch the microphone off on the Record bar or under Settings → Recording to record silently.</string>
+</dict>
+</plist>

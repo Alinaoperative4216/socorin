@@ -130,7 +130,8 @@ button.ghost.danger {
 }
 
 input[type="text"],
-input:not([type]) {
+input:not([type]),
+select {
   font: inherit;
   color: var(--text);
   background: var(--bg);
@@ -141,8 +142,13 @@ input:not([type]) {
   outline: none;
 }
 
-input:focus {
+input:focus,
+select:focus {
   border-color: var(--accent-ink);
+}
+
+select:disabled {
+  opacity: 0.5;
 }
 
 code {
@@ -166,7 +172,7 @@ kbd {
    drawn exactly over the one the overlay showed, so Record turns into Stop
    and Cancel stays where it was. */
 .record-bar {
-  width: 600px;
+  width: 640px;
   box-sizing: border-box;
 }
 
@@ -236,6 +242,32 @@ kbd {
 
 .tool-btn.stop-copy:hover:not(:disabled) {
   background: var(--toolbar-active-hover);
+}
+
+/* The microphone: a button before the recording (click to switch the
+   sound off / on for the takes to come), an indicator during it. Both take
+   the same 32 px slot, left of the buttons, so nothing shifts. */
+.rec-mic {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 30px;
+  flex: none;
+  border-radius: 4px;
+  color: var(--toolbar-text);
+}
+
+.rec-mic.off {
+  color: var(--toolbar-muted);
+}
+
+.rec-mic.issue {
+  color: #ffb340;
+}
+
+.rec-mic.unknown {
+  opacity: 0.5;
 }
 
 .rec-dot {
@@ -686,6 +718,15 @@ html[data-window="recorder"] body {
 .hint {
   color: var(--muted);
   font-size: 12px;
+}
+
+/* A hint that reports a problem (microphone access is off). */
+.hint.warning-text {
+  color: var(--text);
+  background: var(--warn-bg);
+  border: 1px solid var(--warn-border);
+  border-radius: 4px;
+  padding: 6px 9px;
 }
 
 .field {
