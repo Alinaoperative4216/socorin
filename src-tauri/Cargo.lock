@@ -4278,7 +4278,7 @@ dependencies = [
 
 [[package]]
 name = "socorin"
-version = "1.2.0"
+version = "1.2.1"
 dependencies = [
  "block2",
  "chrono",
