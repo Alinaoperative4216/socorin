@@ -44,7 +44,7 @@ that site for a newer version once a day.
   toolbar sends the picture, annotations included, to socorin.com and puts a
   share link on the clipboard, announced in a small popover next to the
   button you clicked (Copy again / Delete from server) that also says when
-  the file goes. Files are kept for 60 days at most and may be 5 MB at most
+  the file goes. Files are kept for 60 days at most and may be 15 MB at most
   on socorin.com; Socorin itself never uploads
   more than 25 MB, whatever a server allows. The link it copies always has
   to be one on the server the capture went to — an answer pointing anywhere

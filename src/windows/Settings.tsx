@@ -537,7 +537,7 @@ export function Settings() {
         </label>
         <p className="hint">
           <em>Upload &amp; copy link</em> sends a capture to this server, which keeps it for a limited time (60 days and
-          5 MB per file on socorin.com) and answers with a link that goes to the clipboard. Nothing is uploaded unless
+          15 MB per file on socorin.com) and answers with a link that goes to the clipboard. Nothing is uploaded unless
           you ask. The install ID is a random token the server hands out to hold off spam; there are no accounts.
         </p>
         <h3>Shared links</h3>

@@ -41,7 +41,7 @@ phiên bản mới ở đó mỗi ngày một lần.
 - *Upload & copy link*: một cú bấm (hoặc `Ctrl/⌘+Shift+U`) trên thanh công cụ
   chú thích sẽ tải ảnh (đã kèm chú thích) lên socorin.com và đưa link chia sẻ
   vào clipboard, kèm một thông báo nhỏ ngay dưới icon trên menu bar / khay
-  (Copy again / Delete from server). File được giữ 60 ngày, tối đa 5 MB trên
+  (Copy again / Delete from server). File được giữ 60 ngày, tối đa 15 MB trên
   socorin.com; bản thân Socorin không bao giờ tải lên quá 25 MB, dù server
   cho phép bao nhiêu. Link được sao chép bắt buộc phải nằm trên đúng server
   đã nhận ảnh — câu trả lời trỏ đi nơi khác sẽ bị từ chối và không có gì vào

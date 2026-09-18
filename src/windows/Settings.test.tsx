@@ -333,6 +333,12 @@ describe("Settings window", () => {
     expect(screen.getByText("Link copied").className).toContain("ok");
   });
 
+  it("states what socorin.com keeps: 60 days, 15 MB per file", async () => {
+    const { container } = await mountLoaded();
+    const hint = [...container.querySelectorAll("p.hint")].find((p) => p.textContent?.includes("Upload & copy link"));
+    expect(hint?.textContent).toMatch(/\(60 days and\s+15 MB per file on socorin\.com\)/);
+  });
+
   it("shows the install id with a reset, and the shared links with copy and delete", async () => {
     tauri.handlers.get_settings = () => ({ ...SETTINGS, installId: "inst-00000000000000001" });
     tauri.handlers.share_history = () => [LINK];
