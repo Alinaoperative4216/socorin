@@ -121,9 +121,10 @@ scripts/build-linux.sh                                    # Ubuntu x86_64 .deb +
 scripts/build-linux.sh arm64                              # Ubuntu aarch64
 ```
 
-Bản Windows và Linux build theo cách này mới chỉ biên dịch được, chưa chạy
-thử tại chỗ; hãy chạy trên máy thật một lần trước khi phát hành. Script
-Linux ghi `SHA256SUMS-linux.txt` cạnh các gói; hãy công bố checksum cùng bộ
+Bộ cài Windows và Linux build theo cách này đã được chạy trên máy thật và
+hoạt động tốt. Tuy vậy máy Mac dùng để build không chạy thử được chúng, nên
+mỗi bản build mới vẫn cần chạy nhanh một lần trên hệ điều hành đích trước khi
+phát hành. Script Linux ghi `SHA256SUMS-linux.txt` cạnh các gói; hãy công bố checksum cùng bộ
 cài. Các image Docker pin Node và rustup theo phiên bản và SHA-256, bước dự
 phòng AppImage cũng pin các file `linuxdeploy` tải về như vậy;
 `scripts/makensis-docker` chỉ mount thư mục dự án và cache của Tauri vào

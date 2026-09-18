@@ -29,7 +29,8 @@ and `Socorin_<v>_amd64.AppImage.sig`. Without the key the builds still work,
 but the in-app updater cannot install them.
 
 Run the Windows and Linux installers once on a real machine before
-publishing; the cross-builds are compiled, not smoke-tested.
+publishing: the cross-builds are known to work there, but the Mac that
+compiles them cannot start them.
 
 ## 3. Publish
 

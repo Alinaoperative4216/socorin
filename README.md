@@ -133,8 +133,9 @@ scripts/build-linux.sh                                    # Ubuntu x86_64 .deb +
 scripts/build-linux.sh arm64                              # Ubuntu aarch64
 ```
 
-The Windows and Linux builds produced this way are compiled but not
-smoke-tested here; run them once on a real machine before shipping. The
+The Windows and Linux installers built this way have been run on real
+machines and work. The Mac that compiles them cannot start them, though, so
+give every new build a quick run on its target system before shipping. The
 Linux script writes `SHA256SUMS-linux.txt` next to the bundles; publish the
 checksums with the installers. The Docker images pin Node and rustup by
 version and SHA-256, and the AppImage fallback pins its `linuxdeploy`
