@@ -140,6 +140,12 @@ scripts/build-linux.sh                                    # Ubuntu x86_64 .deb +
 scripts/build-linux.sh arm64                              # Ubuntu aarch64
 ```
 
+`scripts/build-macos.sh` ends by moving the `Socorin.app` it bundled from
+`…/release/bundle/macos/` to `…/release/bundle/macos.noindex/`
+(`scripts/spotlight-hide-bundles.sh`): Spotlight skips folders named
+`*.noindex`, so the build copy is not listed next to the installed app. Run
+that script by hand after a manual `tauri build` on a Mac.
+
 The Windows and Linux installers built this way have been run on real
 machines and work. The Mac that compiles them cannot start them, though, so
 give every new build a quick run on its target system before shipping. The

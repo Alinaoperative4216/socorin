@@ -31,8 +31,11 @@ case "$ARCH" in
 esac
 
 # Spotlight would otherwise list the .app bundled below next to the
-# installed one.
-mkdir -p src-tauri/target && touch src-tauri/target/.metadata_never_index
+# installed one. The bundle is moved into a folder Spotlight skips when
+# this script ends, however it ends (the helper says why nothing simpler
+# works); leftovers of earlier or manual builds go first.
+scripts/spotlight-hide-bundles.sh
+trap 'scripts/spotlight-hide-bundles.sh || true' EXIT
 
 # ---- phase 1: no credentials in the environment ----
 npm run tauri build -- --target "$TARGET" --no-bundle
