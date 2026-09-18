@@ -97,7 +97,8 @@ sed -E -i '' \
 grep -c "Socorin_${VERSION}_" "$PAGE" >/dev/null || { echo "no download links updated in $PAGE" >&2; exit 1; }
 
 # The installer sizes on the page ("Bộ cài .exe · 3,7 MB", "Universal .dmg ·
-# 7,6 MB", the sentence naming both) and their English translations in
+# 7,6 MB", the sentence naming both, and the big Windows figure that stands
+# without its unit, `t("3,7")`) and their English translations in
 # lib/i18n.ts: decimal megabytes with one decimal, a comma in Vietnamese, a
 # dot in English. The previous sizes are read from the page itself.
 I18N="$LANDING/lib/i18n.ts"
@@ -115,9 +116,14 @@ else
     sed -E -i '' \
       -e "s/${OLD_WIN/./,} MB/${NEW_WIN/./,} MB/g" -e "s/${OLD_WIN/./\\.} MB/${NEW_WIN} MB/g" \
       -e "s/${OLD_MAC/./,} MB/${NEW_MAC/./,} MB/g" -e "s/${OLD_MAC/./\\.} MB/${NEW_MAC} MB/g" \
+      -e "s/t\\(\"${OLD_WIN/./,}\"\\)/t(\"${NEW_WIN/./,}\")/g" \
+      -e "s/\"${OLD_WIN/./,}\": \"${OLD_WIN/./\\.}\"/\"${NEW_WIN/./,}\": \"${NEW_WIN}\"/g" \
       "$f"
   done
   echo "sizes: Windows ${NEW_WIN} MB, macOS ${NEW_MAC} MB (were ${OLD_WIN} / ${OLD_MAC})"
+  # The big figure only follows when it agreed with the rest of the page.
+  grep -q "t(\"${NEW_WIN/./,}\")" "$PAGE" && grep -q "\"${NEW_WIN/./,}\": \"${NEW_WIN}\"" "$I18N" ||
+    echo "warning: the big Windows size figure (t(\"N,N\") in $PAGE and its line in $I18N) does not say ${NEW_WIN/./,}; update it by hand" >&2
 fi
 
 cd "$LANDING"
