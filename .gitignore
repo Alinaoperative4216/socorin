@@ -44,3 +44,4 @@ design/preview/
 # Claude Code working notes: local only, never published
 CLAUDE.md
 .claude/
+.serena/

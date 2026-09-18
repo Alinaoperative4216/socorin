@@ -103,12 +103,12 @@ function BlurNode({ shape, image, imageWidth, imageHeight, interactive, onSelect
     width: Math.max(1, Math.min(shape.width, imageWidth - shape.x)),
     height: Math.max(1, Math.min(shape.height, imageHeight - shape.y)),
   };
-  const pixelSize = Math.max(6, Math.round(Math.min(shape.width, shape.height) / 12));
+  const pixelSize = Math.max(Math.round(shape.strokeWidth * 3), Math.round(Math.min(shape.width, shape.height) / 12));
 
   useEffect(() => {
     const node = ref.current;
     if (!node || shape.width < 1 || shape.height < 1) return;
-    node.cache();
+    node.cache({ pixelRatio: 1 });
     node.getLayer()?.batchDraw();
   }, [crop.x, crop.y, crop.width, crop.height, shape.width, shape.height, image, pixelSize]);
 

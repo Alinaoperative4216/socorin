@@ -1,5 +1,5 @@
 import { act, fireEvent, render } from "@testing-library/react";
-import type Konva from "konva";
+import Konva from "konva";
 import { useEffect } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { installTauri } from "../test/tauri";
@@ -55,6 +55,46 @@ describe("AnnotationStage", () => {
     expect(node<Konva.Image>("b1").isCached()).toBe(true);
     setShapes([{ ...blur, width: 0.5, height: 0.5 }]);
     expect(stage().find("#b1").length).toBe(1);
+  });
+
+  it("keeps pixelation strong for a small region", () => {
+    const { node, setShapes } = mount();
+    setShapes([{ ...blur, width: 20, height: 12 }]);
+
+    expect(node<Konva.Image>("b1").pixelSize()).toBe(12);
+  });
+
+  it("maps every stroke size to a distinct pixelation strength", () => {
+    const { node, setShapes } = mount();
+    for (const [strokeWidth, pixelSize] of [
+      [2, 6],
+      [3, 9],
+      [4, 12],
+      [6, 18],
+      [8, 24],
+    ]) {
+      setShapes([{ ...blur, width: 20, height: 12, strokeWidth }]);
+      expect(node<Konva.Image>("b1").pixelSize()).toBe(pixelSize);
+    }
+  });
+
+  it("preserves proportional pixelation strength for a large region", () => {
+    const { node, setShapes } = mount();
+    setShapes([{ ...blur, x: 0, y: 0, width: 400, height: 300 }]);
+
+    expect(node<Konva.Image>("b1").pixelSize()).toBe(25);
+  });
+
+  it("caches pixelation in source-image pixels", () => {
+    const cache = vi.spyOn(Konva.Image.prototype, "cache");
+    try {
+      const { setShapes } = mount();
+      setShapes([blur]);
+
+      expect(cache).toHaveBeenCalledWith({ pixelRatio: 1 });
+    } finally {
+      cache.mockRestore();
+    }
   });
 
   it("switches the cursor class with the tool", () => {
