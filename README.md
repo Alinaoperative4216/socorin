@@ -10,6 +10,13 @@ Lives in the menu bar / system tray, wakes up on a global shortcut, lets you dra
 a region on any monitor and annotate it with arrows, rectangles, ellipses, lines,
 freehand strokes, text, highlights, numbered markers and pixelation.
 
+![Dragging a region, annotating it in place with shapes, text, numbered markers and pixelation, then copying it](docs/images/socorin-screenshot.gif)
+
+Recording a region works the same way: drag, record, *Stop & copy*, paste the
+video into a chat.
+
+![Dragging a region, recording it and copying the video to the clipboard](docs/images/socorin-recording.gif)
+
 Built with [Tauri v2](https://tauri.app) (Rust core) and React + TypeScript
 (UI, [Konva](https://konvajs.org) for the annotation canvas).
 

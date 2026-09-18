@@ -11,6 +11,13 @@ toàn cục, cho phép kéo chọn vùng trên bất kỳ màn hình nào rồi 
 mũi tên, khung chữ nhật, ellipse, đường thẳng, nét vẽ tay, chữ, highlight,
 đánh số thứ tự và làm mờ (pixelate).
 
+![Kéo chọn một vùng, chú thích ngay tại chỗ bằng hình, chữ, số thứ tự và làm mờ, rồi sao chép](docs/images/socorin-screenshot.gif)
+
+Quay một vùng màn hình cũng theo cách đó: kéo chọn, quay, *Stop & copy*, rồi dán
+video vào cuộc trò chuyện.
+
+![Kéo chọn một vùng, quay lại và sao chép video vào clipboard](docs/images/socorin-recording.gif)
+
 Xây dựng bằng [Tauri v2](https://tauri.app) (lõi Rust) và React + TypeScript
 (giao diện, [Konva](https://konvajs.org) cho canvas chú thích).
 
@@ -124,8 +131,8 @@ scripts/build-linux.sh arm64                              # Ubuntu aarch64
 Bộ cài Windows và Linux build theo cách này đã được chạy trên máy thật và
 hoạt động tốt. Tuy vậy máy Mac dùng để build không chạy thử được chúng, nên
 mỗi bản build mới vẫn cần chạy nhanh một lần trên hệ điều hành đích trước khi
-phát hành. Script Linux ghi `SHA256SUMS-linux.txt` cạnh các gói; hãy công bố checksum cùng bộ
-cài. Các image Docker pin Node và rustup theo phiên bản và SHA-256, bước dự
+phát hành. Script Linux ghi `SHA256SUMS-linux.txt` cạnh các gói; hãy công bố
+checksum cùng bộ cài. Các image Docker pin Node và rustup theo phiên bản và SHA-256, bước dự
 phòng AppImage cũng pin các file `linuxdeploy` tải về như vậy;
 `scripts/makensis-docker` chỉ mount thư mục dự án và cache của Tauri vào
 container NSIS. Container này build bản NSIS chính thức từ source và stub đã
